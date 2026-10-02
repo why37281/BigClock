@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark" data-half="full" data-pal="A2" data-sem="on" data-tint="cyan">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BigClock</title>
+<link rel="stylesheet" href="./src/styles.css" />
+</head>
+<body>
+
+<!-- ================= 展示层 ================= -->
+<div class="view" id="view">
+  <header id="header">
+    <div class="bar-wrap" id="bar-wrap">
+      <div class="title" id="title"></div>
+      <div class="segs" id="segs"></div>
+    </div>
+  </header>
+
+  <main>
+    <div class="clock" id="clock"></div>
+    <div class="date" id="date"></div>
+  </main>
+</div>
+
+<!-- 展示层右下角：平时隐形，鼠标移上去才浮现 -->
+<div class="dock" id="dock">
+  <button id="btn-settings" title="设置（F1）" aria-label="设置">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+         stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="3.2"/>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-2.83 1.17v.17a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.08A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.08A1.65 1.65 0 0 0 20.91 10H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    </svg>
+  </button>
+</div>
+
+<!-- ================= 设置层 ================= -->
+<div class="settings" id="settings" hidden>
+  <div class="settings-card" role="dialog" aria-modal="true" aria-labelledby="settings-h">
+    <div class="settings-head">
+      <h1 id="settings-h">设置</h1>
+      <div class="settings-status" id="settings-status"></div>
+      <button class="icon-btn" id="btn-close" title="关闭（Esc）" aria-label="关闭">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <path d="M6 6l12 12M18 6L6 18"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="settings-body">
+      <!-- ---------- 作息表 ---------- -->
+      <section class="sec">
+        <div class="sec-head">
+          <h2>作息表</h2>
+          <span class="hint">进度条按每段真实时长分配宽度</span>
+        </div>
+        <div class="periods" id="periods"></div>
+        <div class="sec-foot">
+          <button class="btn" id="btn-add-period">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <path d="M12 5v14M5 12h14"/>
+            </svg>
+            添加时段
+          </button>
+          <span class="hint" id="periods-summary"></span>
+        </div>
+      </section>
+
+      <!-- ---------- 显示 ---------- -->
+      <section class="sec">
+        <div class="sec-head"><h2>显示</h2></div>
+        <div class="grid">
+          <label class="field">
+            <span>显示模式</span>
+            <select id="f-mode">
+              <option value="fullscreen">全屏展示</option>
+              <option value="window">窗口配置</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>半屏（黑板挡哪边选哪边）</span>
+            <select id="f-half">
+              <option value="full">整屏</option>
+              <option value="left">左半屏</option>
+              <option value="right">右半屏</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>显示器</span>
+            <select id="f-screen"></select>
+          </label>
+
+          <label class="field">
+            <span>时长格式</span>
+            <select id="f-clockfmt">
+              <option value="hm">时:分（19:29）</option>
+              <option value="hms">时:分:秒（19:29:53）</option>
+            </select>
+          </label>
+
+          <label class="field span2">
+            <span>顶部标题（留空则不显示）</span>
+            <input type="text" id="f-title" maxlength="40" placeholder="例如：高三（2）班 晚自习" />
+          </label>
+        </div>
+      </section>
+
+      <!-- ---------- 外观 ---------- -->
+      <section class="sec">
+        <div class="sec-head"><h2>外观</h2></div>
+        <div class="grid">
+          <label class="field">
+            <span>主题</span>
+            <select id="f-theme">
+              <option value="dark">暗色（晚自习）</option>
+              <option value="light">亮色（白天/开灯）</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>对比度档位</span>
+            <select id="f-contrast">
+              <option value="A">A · 最清晰（19.5:1）</option>
+              <option value="A2">A2 · 推荐（15.7:1）</option>
+              <option value="B">B · 更柔（13.9:1）</option>
+              <option value="C">C · 最柔（12.3:1）</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>背景色偏</span>
+            <select id="f-tint">
+              <option value="cyan">偏青（与语义色同族）</option>
+              <option value="neutral">中性</option>
+              <option value="warm">偏暖</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>语义色</span>
+            <select id="f-sem">
+              <option value="on">开启（当前段用青色）</option>
+              <option value="off">关闭（退回纯灰）</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <!-- ---------- 进度条 ---------- -->
+      <section class="sec">
+        <div class="sec-head"><h2>进度条</h2></div>
+        <div class="grid">
+          <label class="field">
+            <span>显示进度条</span>
+            <select id="f-bar-enabled">
+              <option value="true">显示</option>
+              <option value="false">隐藏</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>当前段显示段名</span>
+            <select id="f-bar-names">
+              <option value="false">不显示</option>
+              <option value="true">显示</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>空洞自动补成课间</span>
+            <select id="f-bar-gap">
+              <option value="true">自动补</option>
+              <option value="false">不补</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <!-- ---------- 配置文件 ---------- -->
+      <section class="sec">
+        <div class="sec-head"><h2>配置文件</h2></div>
+        <p class="hint file-hint">
+          作息表保存在下面这个文本文件里，可以直接用记事本编辑，存盘即时生效，不用重启。
+        </p>
+        <div class="file-row">
+          <code id="cfg-path">…</code>
+          <button class="btn" id="btn-open-file">打开所在文件夹</button>
+          <button class="btn" id="btn-reload">重新读取</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="settings-foot">
+      <span class="hint" id="dirty-hint"></span>
+      <button class="btn ghost" id="btn-revert">放弃修改</button>
+      <button class="btn primary" id="btn-save">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+<div class="corner-note" id="corner-note" hidden></div>
+
+<script type="module" src="./src/main.ts"></script>
+</body>
+</html>

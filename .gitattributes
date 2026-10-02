@@ -1,0 +1,21 @@
+# 统一换行符，避免 Windows 上满屏 "LF will be replaced by CRLF" 警告
+# 文本文件在仓库里一律用 LF，检出时按平台自动转换
+* text=auto eol=lf
+
+# Windows 专用脚本保持 CRLF，免得某些工具读不了
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# 二进制文件：不参与任何文本转换与 diff
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.icns  binary
+*.ttf   binary
+*.exe   binary
+
+# 让 GitHub 的语言统计正确识别
+*.ts    linguist-language=TypeScript
+*.rs    linguist-language=Rust
+vite.config.ts linguist-detectable=true

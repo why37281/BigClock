@@ -1,0 +1,18 @@
+# ---- 依赖与构建产物 ----
+node_modules/
+src-tauri/target/
+src-tauri/gen/
+dist/
+
+# 图标源图（各尺寸图标已生成到 src-tauri/icons/，源图不必进仓库）
+icons-source.png
+
+# ---- 编辑器 / 系统 ----
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ---- 开发期自动化验收脚本（浏览器 profile 有 5MB 垃圾，不进仓库）----
+.preview/

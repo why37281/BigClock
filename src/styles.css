@@ -1,0 +1,397 @@
+/* ============================================================================
+   BigClock —— 全部样式
+   配色结构：灰阶 + 极色 + 一个语义色相。
+   语义色（青）只允许出现在"当前正在进行的那一段"上，其余一律中性。
+   禁止：大面积渐变、多色相并存、装饰性彩色、发光、亮色外扩、玻璃拟态、卡片投影。
+   ========================================================================== */
+
+/* ===================== 字体 ===================== */
+@font-face {
+  font-family: "Rajdhani";
+  src: url("../public/fonts/Rajdhani-SemiBold.ttf") format("truetype");
+  font-weight: 600;
+  font-display: block;
+}
+
+/* ===================== 尺寸令牌 =====================
+   ★ 这些就是"要调的参数"。时钟字号 --digit-fill 由 JS 量真实宽度后写入，
+     这里的值只是 JS 没跑起来时的兜底（必须选任何比例都不溢出的保守值）。 */
+:root {
+  --seg-gap: 0.55vmin;
+  --bar-h: 2.4vmin;
+  --pad-y: min(5.5vmin, 4.6vw);
+  --pad-x: min(5.5vmin, 4.6vw);
+  /* 时钟总宽 ≈ 3.0em（主体 2.63 + 秒区 0.37）。要不超过视口宽的 88%：
+     字号 ≤ 0.88/3.0 = 29.3vw → 取 29vw 留余量。 */
+  --digit-fill: min(29vw, 42vmin);
+  --date: min(4.6vmin, 2.6vw);
+  --stroke: 0.22vmin;
+  --ease: cubic-bezier(.22, .61, .36, 1);
+  --dur: 320ms;
+  --grow-target: 2.5;   /* 当前段拉到原长的 250% */
+  --grow-cap: 70%;      /* 上限：总宽的 70% */
+}
+
+/* ===================== 主题：灰阶 + 极色 ===================== */
+html[data-theme="dark"] {
+  --bg: #0D1315;
+  --fg: #E8EAEC;
+  --gray-strong: #9A9FA4;
+  --dim: #7A7C7D;
+  --stroke-dim: #7A7C7D;
+  --track: #1E2124;
+  --active: #E8EAEC;
+  --on-active: #0F1114;
+  --accent: #4FD1C5;
+  --accent-soft: #14292B;
+  --accent-fill: #4FD1C5;
+  --on-accent: #0F1114;
+  --bar-track: #2B2F33;
+  --panel: #14181B;
+  --panel-line: rgba(255,255,255,.12);
+  --field-bg: #0B0F11;
+  --field-fg: #E8EAEC;
+}
+
+html[data-theme="light"] {
+  --bg: #EAF7F5;
+  --fg: #000000;
+  --gray-strong: rgba(0,0,0,.64);
+  --dim: #7A7C7D;
+  --stroke-dim: #7A7C7D;
+  --track: rgba(0,0,0,.055);
+  --active: #000000;
+  --on-active: #F7F8F9;
+  /* 亮色语义色：青在亮底上要够对比度就必须压深（物理约束，不是审美选择）。
+     #0B7275 在三种亮底上均 ≥4.5:1，同时保留明确的青色相，不会读成"黑"。 */
+  --accent: #0B7275;
+  --accent-soft: #D6ECEA;
+  --accent-fill: #0B7275;
+  --on-accent: #FFFFFF;
+  --bar-track: rgba(0,0,0,.10);
+  --panel: #FFFFFF;
+  --panel-line: rgba(0,0,0,.14);
+  --field-bg: #FFFFFF;
+  --field-fg: #0B0F11;
+}
+
+/* ---- 对比度档位（只作用于暗色主题）---- */
+html[data-theme="dark"][data-pal="A"]  { --bg:#0B0D10; --fg:#FFFFFF; --gray-strong:#A2A3A4; --track:#1A1C1E; --active:#FFFFFF; --on-active:#0B0D10; --ls:.012em; --ts:0 .22vmin .9vmin rgba(0,0,0,.30); --panel:#121619; }
+html[data-theme="dark"][data-pal="A2"] { --bg:#0F1114; --fg:#E8EAEC; --gray-strong:#9A9FA4; --track:#1E2124; --active:#E8EAEC; --on-active:#0F1114; --ls:.018em; --ts:0 .26vmin 1.1vmin rgba(0,0,0,.34); --panel:#15191C; }
+html[data-theme="dark"][data-pal="B"]  { --bg:#121417; --fg:#DCE0E4; --gray-strong:#92979C; --track:#212428; --active:#DCE0E4; --on-active:#121417; --ls:.026em; --ts:0 .30vmin 1.3vmin rgba(0,0,0,.38); --panel:#181C1F; }
+html[data-theme="dark"][data-pal="C"]  { --bg:#15181C; --fg:#D2D7DC; --gray-strong:#8A8F95; --track:#24282C; --active:#D2D7DC; --on-active:#15181C; --ls:.034em; --ts:0 .34vmin 1.5vmin rgba(0,0,0,.42); --panel:#1B1F23; }
+
+/* ---- 背景色偏：只染色、不增亮（暗色主题亮度变化 < 10%）---- */
+html[data-theme="dark"][data-tint="cyan"]    { --bg:#0D1315; --accent-soft:#12292A; }
+html[data-theme="dark"][data-tint="warm"]    { --bg:#141210; --accent-soft:#2A2119; }
+html[data-theme="dark"][data-tint="neutral"] { --bg:#0F1114; --accent-soft:#14292B; }
+
+html[data-theme="light"][data-tint="neutral"] { --bg:#F7F8F9; --track:rgba(0,0,0,.055); --bar-track:rgba(0,0,0,.11); --accent-soft:#E6E9EA; }
+html[data-theme="light"][data-tint="warm"]    { --bg:#F5F3EF; --track:rgba(0,0,0,.05);  --bar-track:rgba(0,0,0,.105); --accent-soft:#E8E6E1; }
+html[data-theme="light"][data-tint="cyan"]    { --bg:#EAF7F5; --track:rgba(0,0,0,.05);  --bar-track:rgba(0,0,0,.10);  --accent-soft:#D6ECEA; }
+
+/* ---- 语义色关闭：退回纯灰（当前段也用极色）---- */
+html[data-sem="off"][data-theme="dark"]  { --accent:#E8EAEC; --accent-soft:#1E2124; --accent-fill:#E8EAEC; --on-accent:#0F1114; }
+html[data-sem="off"][data-theme="light"] { --accent:#000000; --accent-soft:rgba(0,0,0,.055); --accent-fill:#000000; --on-accent:#F7F8F9; }
+
+/* ===================== 基础 ===================== */
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "Rajdhani", system-ui, "Microsoft YaHei UI", sans-serif;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  cursor: default;
+}
+/* 展示状态下 3 秒不动鼠标就隐藏光标（大屏必备）；由 JS 切换 class */
+body.hide-cursor, body.hide-cursor * { cursor: none !important; }
+body.settings-open { cursor: default; }
+
+/* ===================== 半屏：宽度定值 + transform 位移 =====================
+   两个刻意的选择：
+     1. 位移用【百分比】而不是 JS 写的像素值 —— translateX(100%) 就是自身宽度
+        （半屏时即半个视口），不需要测量，也就不存在"测早了/测晚了"的问题。
+     2. 不加 will-change —— 它会把 .view 整块提升为独立合成层并提前栅格化，
+        层内文字在尺寸/字号变化时可能沿用旧的栅格结果，看起来就是"重算没生效"。
+   宽度切换【不参与动画】：宽度一变就必须重算 layout()/fitClock()（像素级精确），
+   让它参与动画等于每帧重算，反而会把动画拖死。 */
+.view {
+  position: absolute; top: 0; bottom: 0; left: 0;
+  display: flex; flex-direction: column;
+  transition: transform var(--dur) var(--ease);
+}
+html[data-half="full"]  .view { width: 100%; transform: translateX(0); }
+html[data-half="left"]  .view { width: 50%;  transform: translateX(0); }
+html[data-half="right"] .view { width: 50%;  transform: translateX(100%); }
+
+/* ===================== 顶部：标题 + 分段胶囊条 =====================
+   栏高由 --bar-h 控制；描边用真 border（不用 inset box-shadow，它会和填充的
+   圆角互相咬，看着像"条里还套了一根细条"）；未填充部分用中性轨底。 */
+header { flex: 0 0 auto; padding: var(--pad-y) var(--pad-x) 0; }
+.title {
+  font-size: min(3.1vmin, 1.9vw);
+  letter-spacing: .12em;
+  color: var(--gray-strong);
+  margin-bottom: min(1.8vmin, 1.2vw);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.title:empty { display: none; }
+.segs { display: flex; align-items: center; gap: var(--seg-gap); height: var(--bar-h); }
+/* 段名（默认关）：只在当前段里显示，压在填充之上 */
+.seg .name {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: calc(var(--bar-h) * .58);
+  letter-spacing: .06em;
+  color: var(--fg);
+  opacity: .82; pointer-events: none; white-space: nowrap;
+  padding: 0 .6em;
+}
+
+.seg {
+  position: relative;
+  flex: 1 1 0;              /* 宽度由 JS 写 flex-grow（按时长比例） */
+  min-width: 0;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--bar-track);
+  border: var(--stroke) solid var(--stroke-dim);
+  transition: flex-grow var(--dur) var(--ease),
+              background var(--dur) var(--ease),
+              border-color var(--dur) var(--ease);
+}
+/* 已过：灰实底，无描边 —— 中性，表示"过去了" */
+.seg.done { background: var(--dim); border-color: transparent; }
+/* 当前：全场唯一的语义色 */
+.seg.now {
+  background: var(--bar-track);
+  border-color: var(--accent);
+  border-width: calc(var(--stroke) * 1.3);
+}
+/* 唯一的进度表达：左实色 / 右空，边界即"现在" */
+.seg.now .fill {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  width: 0%;
+  background: var(--accent-fill);
+  border-radius: 999px;
+  transition: width 900ms cubic-bezier(.4, 0, .2, 1);
+}
+
+/* ===================== 中部：时钟 + 日期 ===================== */
+main {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: min(4.2vmin, 3.4vw);
+  padding-bottom: min(1.6vmin, 1.2vw);
+}
+.clock {
+  font-family: "Rajdhani", system-ui, sans-serif;
+  font-weight: 600;
+  font-size: var(--digit-fill, 42vmin);   /* JS 会覆盖；未覆盖时用兜底值 */
+  /* Rajdhani: ascent .930 / descent .346 => 行盒 1.276em，用于消掉上下大片留白 */
+  line-height: 1.276;
+  margin-block: calc(-0.276em / 2);
+  letter-spacing: var(--ls, .018em);
+  display: flex; align-items: flex-end;
+  flex: 0 0 auto;
+  max-width: 100%;
+  white-space: nowrap;
+}
+/* 暗晕：唯一允许的"阴影"。作用不是装饰，是抹掉纯色笔画在暗底上的硬边，
+   降低长时间直视的疲劳。用 vmin 相对单位，按档位分级。
+   禁止的是"发光/亮色外扩"，不是这种内收的暗晕。 */
+html[data-theme="dark"] .clock,
+html[data-theme="dark"] .date { text-shadow: var(--ts, 0 .26vmin 1.1vmin rgba(0,0,0,.34)); }
+
+/* 逐位定宽格：宽度取 Rajdhani 的真实 advance + 余量（unitsPerEm=1000，从 TTF hmtx 读出：
+   数字最宽 '4'/'8' = 533，冒号 199），每格固定 → 换分钟时整块零位移、零抖动。
+      数字 533/1000 → 取 546（余 13 单位）
+      冒号 199/1000 → 取 212（余 13 单位） */
+.clock .d { display: inline-block; width: .546em; text-align: center; flex: 0 0 auto; }
+.clock .c { display: inline-block; width: .212em; text-align: center; flex: 0 0 auto; }
+/* 秒：无边框，仅下对齐；用相对基线偏移消掉"大字号基线下移"造成的视觉不齐 */
+.clock .sec {
+  display: flex;
+  margin-left: min(1.6vmin, 1.1vw);
+  font-size: .212em;
+  transform: translateY(-.088em);
+}
+/* ★ 必须显式写：作者样式里的 display:flex 会盖掉 [hidden] 的 UA 规则
+   （UA 里那个 display:none 优先级最低），不写这句 hidden 根本不管用。 */
+.clock .sec[hidden] { display: none; }
+
+.date {
+  font-family: "Rajdhani", "Segoe UI Variable Display", system-ui, "Microsoft YaHei UI", sans-serif;
+  font-weight: 500;
+  font-size: var(--date);
+  letter-spacing: .20em;
+  color: var(--gray-strong);
+  white-space: nowrap;
+}
+
+/* ===================== 设置入口（平时隐形） ===================== */
+.dock {
+  position: fixed; right: 2.4vmin; bottom: 2.4vmin; z-index: 30;
+  opacity: 0; transition: opacity .3s;
+}
+body:hover .dock { opacity: .75; }
+body.settings-open .dock { opacity: 0; pointer-events: none; }
+.dock button {
+  background: transparent; border: 0; padding: .6vmin; cursor: pointer;
+  color: var(--fg); display: flex;
+}
+.dock svg { width: 3.2vmin; height: 3.2vmin; }
+
+/* ===================== 设置面板 ===================== */
+.settings {
+  position: fixed; inset: 0; z-index: 100;
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  backdrop-filter: blur(3px);
+  display: flex; align-items: center; justify-content: center;
+  font-family: system-ui, "Microsoft YaHei UI", sans-serif;
+}
+.settings[hidden] { display: none; }
+
+.settings-card {
+  width: min(920px, 94vw);
+  max-height: 92vh;
+  display: flex; flex-direction: column;
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--panel-line);
+  border-radius: 16px;
+  overflow: hidden;
+}
+.settings-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--panel-line);
+}
+.settings-head h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: .04em; }
+.settings-status { flex: 1 1 auto; font-size: 12px; opacity: .65; }
+.icon-btn {
+  background: transparent; border: 0; color: var(--fg); cursor: pointer;
+  padding: 6px; border-radius: 8px; display: flex;
+}
+.icon-btn:hover { background: color-mix(in srgb, var(--fg) 12%, transparent); }
+.icon-btn svg { width: 18px; height: 18px; }
+
+.settings-body { overflow-y: auto; padding: 4px 20px 12px; }
+.sec { padding: 16px 0; border-bottom: 1px solid var(--panel-line); }
+.sec:last-child { border-bottom: 0; }
+.sec-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+.sec-head h2 { font-size: 14px; font-weight: 600; margin: 0; letter-spacing: .06em; }
+.hint { font-size: 12px; opacity: .6; }
+
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
+.field { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.field > span { opacity: .72; }
+.field.span2 { grid-column: 1 / -1; }
+.field select, .field input {
+  font: inherit; font-size: 13px;
+  background: var(--field-bg); color: var(--field-fg);
+  border: 1px solid var(--panel-line); border-radius: 9px;
+  padding: 8px 10px; min-width: 0;
+}
+.field input:focus, .field select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ---------- 作息表编辑 ---------- */
+.periods { display: flex; flex-direction: column; gap: 8px; }
+.period-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto auto;
+  align-items: center; gap: 8px;
+  padding: 8px; border-radius: 10px;
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+}
+.period-row input {
+  font: inherit; font-size: 13px;
+  background: var(--field-bg); color: var(--field-fg);
+  border: 1px solid var(--panel-line); border-radius: 8px;
+  padding: 7px 9px; min-width: 0; width: 100%;
+}
+.period-row input[type="time"] { width: auto; font-variant-numeric: tabular-nums; }
+.period-row .dash { opacity: .45; }
+.period-row .dur { font-size: 12px; opacity: .6; min-width: 5.5em; text-align: right; font-variant-numeric: tabular-nums; }
+.period-row .del {
+  background: transparent; border: 1px solid var(--panel-line); color: var(--fg);
+  border-radius: 8px; cursor: pointer; padding: 6px; display: flex; opacity: .7;
+}
+.period-row .del:hover { opacity: 1; border-color: var(--accent); color: var(--accent); }
+.period-row .del svg { width: 15px; height: 15px; }
+.period-row.bad input { border-color: #E06C75; }
+.period-row .rowmsg { grid-column: 1 / -1; font-size: 12px; color: #E06C75; }
+.periods-empty { font-size: 13px; opacity: .55; padding: 10px 2px; }
+.sec-foot { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+
+/* ---------- 按钮 ---------- */
+.btn {
+  display: inline-flex; align-items: center; gap: 7px;
+  font: inherit; font-size: 13px;
+  background: color-mix(in srgb, var(--fg) 9%, transparent);
+  color: var(--fg);
+  border: 1px solid var(--panel-line); border-radius: 9px;
+  padding: 8px 13px; cursor: pointer;
+}
+.btn:hover { background: color-mix(in srgb, var(--fg) 16%, transparent); }
+.btn svg { width: 15px; height: 15px; }
+.btn.primary { background: var(--accent-fill); color: var(--on-accent); border-color: transparent; font-weight: 600; }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.primary:disabled { opacity: .45; cursor: not-allowed; filter: none; }
+.btn.ghost { background: transparent; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+
+.settings-foot {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 20px; border-top: 1px solid var(--panel-line);
+}
+.settings-foot .hint { flex: 1 1 auto; }
+
+.file-hint { margin: 0 0 10px; line-height: 1.6; }
+.file-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.file-row code {
+  flex: 1 1 320px; min-width: 0;
+  font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+  background: var(--field-bg); border: 1px solid var(--panel-line);
+  border-radius: 8px; padding: 8px 10px;
+  overflow-wrap: anywhere;
+}
+
+/* ===================== 角落提示（配置出错等） ===================== */
+.corner-note {
+  position: fixed; left: 2.4vmin; bottom: 2.4vmin; z-index: 60;
+  max-width: 46vw;
+  font-family: system-ui, "Microsoft YaHei UI", sans-serif;
+  font-size: 13px; line-height: 1.55;
+  padding: 9px 13px; border-radius: 10px;
+  background: color-mix(in srgb, #E06C75 20%, var(--bg));
+  border: 1px solid #E06C75; color: var(--fg);
+  white-space: pre-wrap;
+}
+.corner-note[hidden] { display: none; }
+
+/* ===================== 轻提示 ===================== */
+.toast {
+  position: fixed; left: 50%; bottom: 5vh; transform: translateX(-50%);
+  z-index: 200;
+  font-family: system-ui, "Microsoft YaHei UI", sans-serif; font-size: 13px;
+  padding: 10px 16px; border-radius: 10px;
+  background: var(--panel); color: var(--fg);
+  border: 1px solid var(--panel-line);
+}
+.toast[hidden] { display: none; }
+.toast.err { border-color: #E06C75; }
+
+/* ===================== 小屏/窄屏兜底 =====================
+   半屏（竖屏视口）宽度可能只有 1920 甚至更窄，设置面板要能正常用。 */
+@media (max-width: 720px) {
+  .grid { grid-template-columns: 1fr; }
+  .period-row { grid-template-columns: 1fr auto auto auto; }
+  .period-row .dur { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .view, .seg, .seg.now .fill { transition: none; }
+}

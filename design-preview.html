@@ -1,0 +1,601 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark" data-half="full" data-pal="A2" data-sem="on" data-tint="cyan">
+<head>
+<meta charset="utf-8" />
+<title>BigClock 设计稿 v5</title>
+<style>
+  /* ===================== 字体 ===================== */
+  @font-face {
+    font-family: "Rajdhani";
+    src: url("./Rajdhani-SemiBold.ttf") format("truetype");
+    font-weight: 600;
+    font-display: block;
+  }
+
+  /* ===================== 尺寸令牌 —— 你要自己调的参数都在这里 =====================
+     ★ 进度条高度：--bar-h        （现在是"一根棍"2.4vmin，4K 下约 52px）
+     ★ 时钟大小：  --digit-fill   （JS 量真实宽度后写入；兜底值 42vmin）
+     ★ 左右留白：  --pad-x
+     ★ 时钟与日期间距：--gap
+     ★ 条与条之间缝隙：--seg-gap
+     时钟字号用两个上限取小（高度 + 宽度），纯 CSS 计算，不依赖 JS 测量。 */
+  :root {
+    --seg-gap: 0.55vmin;                 /* ← 条与条之间的缝隙 */
+    --bar-h: 2.4vmin;                    /* ← 进度条高度（矮成一根棍） */
+    --pad-y: min(5.5vmin, 4.6vw);
+    --pad-x: min(5.5vmin, 4.6vw);
+    /* 时钟字号：**运行时由 JS 写**（见 fitClock()，两趟解析解）。
+       这一行只是"JS 没跑起来"时的兜底 —— 必须取一个【任何比例都不溢出】的值：
+         · 42vmin 在整屏 16:9 下 = 907px，合适
+         · 但半屏是 8:9 竖屏，42vmin 会撑满整条 → 所以必须再加宽度约束
+         · 时钟总宽 ≈ 2.93em（主体 2.522 + 秒区约 0.41）
+           要不超过视口宽的 88%：字号 ≤ 0.88/2.93 = 30.0vw  → 取 29vw 留余量
+       兜底值取错会让"JS 没生效"表现为时钟溢出，排查时极易误判，所以这里取最保守的。 */
+    --digit-fill: min(29vw, 42vmin);
+    --date:  min(4.6vmin, 2.6vw);
+    --stroke: 0.22vmin;
+    --ease: cubic-bezier(.22, .61, .36, 1);
+    --dur: 320ms;
+    /* 当前段横向拉长的规则 */
+    --grow-target: 2.5;                  /* ← 拉到原长的 250% */
+    --grow-cap: 70%;                     /* ← 上限：总宽度的 70% */
+  }
+
+  /* ===================== 配色体系 =====================
+     结构 = 灰阶 + 极色 + 一个语义色相。
+     语义色（青）只允许出现在"当前正在进行的那一段"上，其余一律中性。
+     对比度档位 A/A2/B/C 控制灰阶与极色的对比强度（越靠后越柔）。
+     背景色偏（tint）只染色、不增亮：暗色主题是"极轻色偏的黑"，
+     亮色主题是"淡彩纸" —— 两者亮度几乎不变，但和语义色成为同族。 */
+  html[data-theme="dark"] {
+    --bg: #0F1114;
+    --fg: #E8EAEC;
+    --gray-strong: #9A9FA4;      /* 日期灰 */
+    --dim: #7A7C7D;              /* 已过段填充 */
+    --stroke-dim: #7A7C7D;       /* 未到段描边 */
+    --track: #1E2124;
+    --active: #E8EAEC;
+    --on-active: #0F1114;
+    /* 语义色：默认青色 */
+    --accent: #4FD1C5;           /* 当前段描边 */
+    --accent-soft: #14292B;      /* 当前段未填充部分 */
+    --accent-fill: #4FD1C5;      /* 当前段进度填充 */
+    --on-accent: #0F1114;        /* 压在填充上的字 */
+    --bar-track: #2B2F33;        /* 未到段：中性轨底（和语义色脱钩，避免"没填的地方也是青的"） */
+  }
+  html[data-theme="light"] {
+    --bg: #F7F8F9;
+    --fg: #000000;
+    --gray-strong: rgba(0,0,0,.64);
+    --dim: #7A7C7D;
+    --stroke-dim: #7A7C7D;
+    --track: rgba(0,0,0,.055);
+    --active: #000000;
+    --on-active: #F7F8F9;
+    /* 亮色语义色：青在亮底上要够对比度就必须压深（这是物理约束，不是审美选择）。
+       #0B7275 在三种亮底上均 ≥4.5:1，同时保留明确的青色相，不会读成"黑"。
+       想要更青亮一点可以试 #0E8C8F（但只有 ~3.7:1，远距离会糊）；更稳可以用 #0A6E71。 */
+    --accent: #0B7275;
+    --accent-soft: #E3F1F0;
+    --accent-fill: #0B7275;
+    --on-accent: #FFFFFF;
+    --bar-track: rgba(0,0,0,.11);
+  }
+
+  /* ---- 对比度档位（暗色主题）----
+     letter-spacing / text-shadow 随档位走：越柔的档位给越松弛的字距和越重的暗晕。
+     这张表同时对应 JavaScript 里的 PALETTES。 */
+  html[data-theme="dark"][data-pal="A"]  { --bg:#0B0D10; --fg:#FFFFFF; --gray-strong:#A2A3A4; --track:#1A1C1E; --active:#FFFFFF; --on-active:#0B0D10; --ls:.012em; --ts:0 .22vmin .9vmin rgba(0,0,0,.30); }
+  html[data-theme="dark"][data-pal="A2"] { --bg:#0F1114; --fg:#E8EAEC; --gray-strong:#9A9FA4; --track:#1E2124; --active:#E8EAEC; --on-active:#0F1114; --ls:.018em; --ts:0 .26vmin 1.1vmin rgba(0,0,0,.34); }
+  html[data-theme="dark"][data-pal="B"]  { --bg:#121417; --fg:#DCE0E4; --gray-strong:#92979C; --track:#212428; --active:#DCE0E4; --on-active:#121417; --ls:.026em; --ts:0 .30vmin 1.3vmin rgba(0,0,0,.38); }
+  html[data-theme="dark"][data-pal="C"]  { --bg:#15181C; --fg:#D2D7DC; --gray-strong:#8A8F95; --track:#24282C; --active:#D2D7DC; --on-active:#15181C; --ls:.034em; --ts:0 .34vmin 1.5vmin rgba(0,0,0,.42); }
+
+  /* ---- 背景色偏：只染色，不增亮（暗色主题亮度变化 < 10%）---- */
+  html[data-theme="dark"][data-tint="cyan"]    { --bg:#0D1315; --accent-soft:#12292A; }
+  html[data-theme="dark"][data-tint="warm"]    { --bg:#141210; --accent-soft:#2A2119; }
+  html[data-theme="dark"][data-tint="neutral"] { --bg:#0F1114; --accent-soft:#14292B; }
+
+  /* ---- 亮色主题：中性冷白 / 暖纸 / 淡青纸 三种 tonal ---- */
+  html[data-theme="light"][data-tint="neutral"] { --bg:#F7F8F9; --track:rgba(0,0,0,.055); --bar-track:rgba(0,0,0,.11); --accent-soft:#E6E9EA; }
+  html[data-theme="light"][data-tint="warm"]    { --bg:#F5F3EF; --track:rgba(0,0,0,.05);  --bar-track:rgba(0,0,0,.105); --accent-soft:#E8E6E1; }
+  html[data-theme="light"][data-tint="cyan"]    { --bg:#EAF7F5; --track:rgba(0,0,0,.05);  --bar-track:rgba(0,0,0,.10);  --accent-soft:#D6ECEA; }
+
+  /* ---- 语义色关闭：退回纯灰（当前段也用极色）---- */
+  html[data-theme="dark"][data-sem="off"] {
+    --accent:#E8EAEC; --accent-soft:#1E2124; --accent-fill:#E8EAEC; --on-accent:#0F1114;
+  }
+  html[data-theme="light"][data-sem="off"] {
+    --accent:#000000; --accent-soft:rgba(0,0,0,.055); --accent-fill:#000000; --on-accent:#F7F8F9;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Rajdhani", system-ui, "Microsoft YaHei UI", sans-serif;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ===================== 半屏：宽度定值 + transform 位移 =====================
+     位移改用 transform（合成器属性，不触发重排），不再动画 left/right（布局属性）。
+     两个刻意的选择：
+       1. 位移用【百分比】而不是 JS 写的像素值 —— translateX(100%) 就是自身宽度
+          （半屏时即半个视口），不需要测量，也就不存在"测早了/测晚了"的问题。
+       2. 不加 will-change —— 它会把 .view 整块提升为独立合成层并提前栅格化，
+          层内的文字在尺寸/字号变化时可能沿用旧的栅格结果，看起来就是"重算没生效"。
+     宽度切换不参与动画：宽度一变就必须重算 layout()/fitClock()（像素级精确），
+     让它参与动画等于每帧重算，反而会把动画拖死。 */
+  .view {
+    position: absolute; top: 0; bottom: 0; left: 0;
+    display: flex; flex-direction: column;
+    transition: transform var(--dur) var(--ease);
+  }
+  html[data-half="full"]  .view { width: 100%; transform: translateX(0); }
+  html[data-half="left"]  .view { width: 50%;  transform: translateX(0); }
+  html[data-half="right"] .view { width: 50%;  transform: translateX(100%); }
+
+  /* ===================== 顶部：分段胶囊条 =====================
+     改版要点：
+       1. 高度由 --bar-h 控制，现在是"一根棍"（2.4vmin，4K 下 ~52px）
+       2. 描边改用真 border（原来用 inset box-shadow，和填充的圆角互相咬，
+          看起来像"条里还套了一根细条"）
+       3. 未填充部分用中性的 --bar-track，不再用语义色浅底 —— 原来"没走到的
+          那一段也是青的"，导致整条看着像已经填了一半
+       4. 当前段长度由 JS 按规则算：目标 250% 原长，上限总宽的 70% */
+  header { flex: 0 0 auto; padding: var(--pad-y) var(--pad-x) 0; }
+  .segs { display: flex; align-items: center; gap: var(--seg-gap); height: var(--bar-h); }
+
+  .seg {
+    position: relative;
+    flex: var(--w, 1) 1 0;               /* --w = JS 算出的期望长度（px） */
+    min-width: 0;
+    height: 100%;
+    border-radius: 999px;
+    background: var(--bar-track);
+    border: var(--stroke) solid var(--stroke-dim);
+    transition: flex-grow var(--dur) var(--ease),
+                background var(--dur) var(--ease),
+                border-color var(--dur) var(--ease);
+  }
+  /* 已过：灰实底，无描边 —— 中性，表示"过去了" */
+  .seg.done { background: var(--dim); border-color: transparent; }
+  /* 当前：全场唯一的语义色 */
+  .seg.now  {
+    background: var(--bar-track);
+    border-color: var(--accent);
+    border-width: calc(var(--stroke) * 1.3);
+  }
+  /* 唯一的进度表达：左实色 / 右空，边界即"现在" */
+  .seg.now .fill {
+    position: absolute; left: 0; top: 0; bottom: 0;
+    width: 0%;
+    background: var(--accent-fill);
+    border-radius: 999px;
+    transition: width 900ms cubic-bezier(.4, 0, .2, 1);
+  }
+
+  /* ===================== 中部：时钟 =====================
+     两条硬约束，写好之后就不再需要估算宽度：
+       1. 每个字符都有与字体度量一致的固定格宽 → 时钟总宽恒定，
+          换分钟（19:59→20:00）时整块零位移、零抖动
+       2. 字号由 CSS 公式算出（系数由 TTF 真实 advance 反推，见 :root 里的 --digit-fill）
+     格宽全部取 Rajdhani 的真实 advance（unitsPerEm=1000，从 TTF 的 hmtx 读出）：
+         数字最宽 533（'4'/'8'） 冒号 199  '1' 最窄 327
+       取 534 / 200 做格宽（各留 1 单位余量），这样最宽的字形也绝不撑破格子。 */
+  main {
+    flex: 1 1 auto; min-height: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: min(4.2vmin, 3.4vw);
+    padding-bottom: min(1.6vmin, 1.2vw);
+  }
+  .clock {
+    font-family: "Rajdhani", system-ui, sans-serif;
+    font-weight: 600;
+    font-size: var(--digit-fill, 42vmin);   /* JS 会覆盖；未覆盖时用兜底下限 */
+    /* Rajdhani: ascent .930 / descent .346 => 行盒 1.276em，用于消掉上下大片留白 */
+    line-height: 1.276;
+    margin-block: calc(-0.276em / 2);
+    letter-spacing: var(--ls, .018em);
+    display: flex; align-items: flex-end;   /* 秒：下对齐 */
+    flex: 0 0 auto;
+    max-width: 100%;
+    white-space: nowrap;
+  }
+  /* 暗晕：唯一允许的"阴影"。作用不是装饰，是抹掉纯色笔画在暗底上的硬边，
+     降低长时间直视的疲劳。用 vmin 相对单位（不是固定 px），且按档位分级。
+     禁止的是"发光/亮色外扩"，不是这种内收的暗晕。 */
+  html[data-theme="dark"] .clock,
+  html[data-theme="dark"] .date { text-shadow: var(--ts, 0 .26vmin 1.1vmin rgba(0,0,0,.34)); }
+  /* 逐位定宽格：宽度取真实 advance + 余量，字形在其中居中。
+     因为每格宽度固定，时钟总宽不随数字变化 → 不会抖。
+       数字最宽 '4'/'8' = 533/1000，取 546（余 13 单位）
+       冒号           = 199/1000，取 212（余 13 单位） */
+  .clock .d { display: inline-block; width: .546em; text-align: center; flex: 0 0 auto; }
+  .clock .c { display: inline-block; width: .212em; text-align: center; flex: 0 0 auto; }
+  /* 秒：无边框，仅下对齐；用相对基线偏移消掉"大字号基线下移"造成的视觉不齐 */
+  .clock .sec {
+    display: flex;
+    margin-left: min(1.6vmin, 1.1vw);
+    font-size: .212em;
+    transform: translateY(-.088em);
+  }
+
+  /* 日期：纯灰，无彩色装饰 */
+  .date {
+    font-family: "Rajdhani", "Segoe UI Variable Display", system-ui, "Microsoft YaHei UI", sans-serif;
+    font-weight: 500;
+    font-size: var(--date);
+    letter-spacing: .20em;
+    color: var(--gray-strong);
+    white-space: nowrap;
+  }
+
+  /* ===================== 设置入口 ===================== */
+  footer { position: fixed; right: 2.4vmin; bottom: 2.4vmin; opacity: 0; transition: opacity .3s; z-index: 30; }
+  body:hover footer { opacity: .75; }
+  footer button { background: transparent; border: 0; padding: .6vmin; cursor: pointer; color: var(--fg); display: flex; }
+  footer svg { width: 3.2vmin; height: 3.2vmin; }
+
+  /* ===================== 预览控制条（仅设计稿，不属于产品） ===================== */
+  #devbar {
+    position: fixed; left: 2.4vmin; bottom: 2.4vmin; z-index: 50;
+    display: flex; align-items: center; gap: 6px;
+    font-family: system-ui, sans-serif; font-size: 14px;
+    background: rgba(0,0,0,.66); padding: 8px 10px; border-radius: 14px;
+    backdrop-filter: blur(8px); color: #fff;
+  }
+  #devbar button {
+    font: inherit; color: #fff; background: transparent;
+    border: 1px solid rgba(255,255,255,.22); border-radius: 9px;
+    padding: 6px 9px; cursor: pointer; display: flex; align-items: center;
+  }
+  #devbar button:hover { background: rgba(255,255,255,.16); }
+  #devbar svg { width: 19px; height: 19px; stroke: #fff; fill: none; stroke-width: 1.7; stroke-linecap: round; }
+  #devbar .sep { width: 1px; align-self: stretch; background: rgba(255,255,255,.2); margin: 2px 4px; }
+  #devbar .cap { opacity: .6; font-size: 12px; letter-spacing: .05em; }
+  #devbar .pal { min-width: 34px; justify-content: center; font-size: 13px; font-weight: 600; border-color: rgba(255,255,255,.35); }
+  #devbar .sem, #devbar .tint { min-width: 30px; justify-content: center; font-size: 12px; font-weight: 600; border-color: rgba(255,255,255,.35); }
+  #devbar .pal[aria-pressed="true"],
+  #devbar .sem[aria-pressed="true"],
+  #devbar .tint[aria-pressed="true"] { outline: 2px solid #fff; outline-offset: 1px; }
+
+  /* 显示模式：一个图标，点一下循环切换三种状态，纹理不同 */
+  #mode svg { width: 26px; height: 26px; }
+  #mode .st { fill: currentColor; }
+</style>
+</head>
+<body>
+<div class="view" id="view">
+  <header><div class="segs" id="segs"></div></header>
+  <main>
+    <div class="clock" id="clock"></div>
+    <div class="date" id="date"></div>
+  </main>
+</div>
+
+<footer>
+  <button title="设置">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="3.2"/>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-2.83 1.17v.17a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.08A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.08A1.65 1.65 0 0 0 20.91 10H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    </svg>
+  </button>
+</footer>
+
+<div id="devbar">
+  <!-- 主题 -->
+  <button data-act="theme" title="亮 / 暗">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/></svg>
+  </button>
+  <div class="sep"></div>
+
+  <!-- 显示模式：一个图标按钮，三态循环，纹理不同 -->
+  <button id="mode" data-act="mode" title="整屏 → 左半屏 → 右半屏">
+    <svg viewBox="0 0 24 24" fill="none">
+      <rect x="2.5" y="4.5" width="19" height="15" rx="2.4"
+            stroke="currentColor" stroke-width="1.8"/>
+      <g id="modefill">
+        <rect class="st" x="4.2" y="6.2" width="15.6" height="11.6" rx="1.4"/>
+      </g>
+    </svg>
+  </button>
+  <div class="sep"></div>
+
+  <!-- 推进进度（仅设计稿用） -->
+  <button data-act="prog" title="推进进度">
+    <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M12 7.5v4.5l3 2"/></svg>
+  </button>
+  <div class="sep"></div>
+
+  <!-- 对比度档位：点一下整屏切换，用来挑"看得清但不刺眼"的那一档 -->
+  <span class="cap">对比度</span>
+  <button class="pal" data-pal="A"  title="A 纯黑白 19.5:1（最清，但久看会累）"   style="background:#0B0D10;color:#fff">A</button>
+  <button class="pal" data-pal="A2" title="A2 墨白 15.7:1（推荐）"                style="background:#0F1114;color:#E8EAEC">A2</button>
+  <button class="pal" data-pal="B"  title="B 中等 13.9:1"                        style="background:#121417;color:#DCE0E4">B</button>
+  <button class="pal" data-pal="C"  title="C 更柔 12.3:1"                        style="background:#15181C;color:#D2D7DC">C</button>
+
+  <div class="sep"></div>
+
+  <!-- 语义色：只作用在"当前段"上 -->
+  <span class="cap">语义色</span>
+  <button class="sem" data-sem="on"  title="青色语义色：当前段变青，后排也能一眼抓到" style="background:#4FD1C5;color:#0F1114">青</button>
+  <button class="sem" data-sem="off" title="关闭：退回纯灰（已过/未到/当前全靠亮度区分）" style="background:#2A2E32;color:#B9BEC3">灰</button>
+
+  <div class="sep"></div>
+
+  <!-- 背景色偏：只染色不增亮 -->
+  <span class="cap">底色</span>
+  <button class="tint" data-tint="neutral" title="中性"   style="background:#0F1114;color:#E8EAEC">中</button>
+  <button class="tint" data-tint="cyan"    title="偏青黑 / 淡青纸：与语义色同族" style="background:#0D1315;color:#4FD1C5">青</button>
+  <button class="tint" data-tint="warm"    title="偏暖黑 / 暖纸：降低屏幕冷感与反光" style="background:#141210;color:#E8D9C0">暖</button>
+</div>
+
+<script>
+// 允许用 URL 参数预设状态（供自动化测量用）：?half=left&theme=dark&pal=B
+(() => {
+  const q = new URLSearchParams(location.search);
+  const r = document.documentElement;
+  if (q.has('half'))  r.dataset.half  = q.get('half');
+  if (q.has('theme')) r.dataset.theme = q.get('theme');
+  if (q.has('pal'))   r.dataset.pal   = q.get('pal');
+})();
+</script>
+<script>
+(() => {
+  const root = document.documentElement;
+
+  /* ---------- 示例作息：18:30 → 22:10 ---------- */
+  const PERIODS = [
+    { name: '晚读',   s: '18:30', e: '19:00' },
+    { name: '第一节', s: '19:00', e: '19:40' },
+    { name: '课间',   s: '19:40', e: '19:50' },
+    { name: '第二节', s: '19:50', e: '20:30' },
+    { name: '课间',   s: '20:30', e: '20:40' },
+    { name: '第三节', s: '20:40', e: '21:20' },
+    { name: '课间',   s: '21:20', e: '21:30' },
+    { name: '自习',   s: '21:30', e: '22:10' },
+  ];
+  const toMin = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+  /* 拉长规则（你要改就改这里，或改 :root 里的 --grow-target / --grow-cap）
+       · 目标长度 = 该段原始长度 × GROW_TARGET（250%）
+       · 上限     = 进度条总宽 × GROW_CAP（70%），超了就用上限 */
+  const GROW_TARGET = 2.5;
+  const GROW_CAP = 0.70;
+
+  const segsEl = document.getElementById('segs');
+  const nodes = PERIODS.map(p => {
+    const el = document.createElement('div');
+    el.className = 'seg';
+    const dur = toMin(p.e) - toMin(p.s);
+    el.innerHTML = '<i class="fill"></i>';
+    segsEl.appendChild(el);
+    return { p, el, a: toMin(p.s), b: toMin(p.e), dur };
+  });
+
+  /* ---------- 逐位定宽时钟 ---------- */
+  const clockEl = document.getElementById('clock');
+  const cell = c => `<span class="d">${c}</span>`;
+  let cache = '';
+  function paint(hhmm, ss) {
+    const key = hhmm + ss;
+    if (key === cache) return;
+    cache = key;
+    clockEl.innerHTML =
+      cell(hhmm[0]) + cell(hhmm[1]) + '<span class="c">:</span>' +
+      cell(hhmm[3]) + cell(hhmm[4]) +
+      `<span class="sec">${cell(ss[0])}${cell(ss[1])}</span>`;
+  }
+
+  /* ---------- 日期：无周次 ---------- */
+  const WD = ['星期日','星期一','星期二','星期三','星期四','星期五','星期六'];
+  const dateEl = document.getElementById('date');
+  function paintDate(d) {
+    dateEl.textContent = `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 · ${WD[d.getDay()]}`;
+  }
+
+  /* ---------- 时钟字号：量真实渲染宽度，一次乘法解出 ----------
+     为什么不能纯 CSS：.view 的可用宽度随模式变（全屏 3840 / 半屏 1920），
+     而 vw/vmin 都相对【视口】，竖屏下算出来偏大 —— 只靠 min(29vw,42vmin) 会溢出。
+
+     算法（v8 起）：量一次"当前字号下时钟的真实渲染宽度"，再用比例解出目标字号。
+     时钟宽度对 font-size 严格线性（格宽/字距/秒区全是 em 单位），所以
+         目标字号 = 当前字号 × (可用宽 × FILL / 当前渲染宽)
+     一次乘法就是精确解：不是迭代、不是试错、不含任何"估出来的 em 常量"。
+
+     历史坑（八版，全部记在这里免得再走回头路）：
+       v1 估"总宽 = 字号 × 2.34em"      → 估小，4K 半屏把 19:36 裁成 9:36
+       v2 量宽度但 --digit 同时当输入输出 → 每轮 ×0.42，缩成 24px 小方块
+       v3 getPropertyValue 取自定义属性   → 得到字符串 "42vmin" 而非像素，上限变 42
+       v4 纯 CSS min(42vmin,31vw)        → 忘扣 --pad-x，依旧溢出
+       v5 首帧元素实测宽度               → 布局未稳，读数偏大，被压到 16px 下限
+       v6 纯 CSS 公式                    → 窗口尺寸变化时不重算，竖屏下偏大
+       v7 单趟"精确公式"                 → 秒区宽度按 2 个格算重了 60%，时钟贴边
+       v8 em 常量硬算 + 读 --pad-x 变量   → 见下面 ★ 根因：parseFloat 得到 NaN，
+                                          函数静默 return，字号永久停在 42vmin
+     教训：① 宽度只信渲染后的真实像素，em 常量一定会数错格子；
+           ② 绝不用 getComputedStyle 读自定义属性再 parseFloat —— 拿到的是原文，不是像素。 */
+  const stage = document.getElementById('view');
+  const cellH = document.getElementById('clock');
+  const headerEl = document.querySelector('header');
+
+  /* ★ 根因记录（v8，2026-10-02）：字号从不重算，真凶是【一个 NaN】，不是"没被调用"。
+     fitClock() 一直有被调用，但它在第二行就 return 了：
+
+         parseFloat(getComputedStyle(root).getPropertyValue('--pad-x')) * 2
+
+     getComputedStyle 读【自定义属性】拿到的是【token 流原文】，不是像素！
+     实测读到的是字符串 "min(5.5vmin, 4.6vw)"（连 "2.4vmin" 都是原样返回），
+     parseFloat("min(5.5vmin, 4.6vw)") = NaN
+       → avail   = 1920 - NaN * 2 = NaN
+       → if (!(avail > 0)) return;   ← 函数在这里静默返回，setProperty 从未执行
+       → --digit-fill 保持 CSS 兜底值，字号永远是 42vmin（3840×2160 下 907.2px）
+       → 看起来就是"切了模式字号不重算"，且【零报错、零控制台输出】，极难察觉。
+     （连带的第二层坑：就算把 NaN 修掉，byWidth 也会算出 "NaNpx" 这种非法值，
+       setProperty 会被静默忽略 —— 症状一模一样。）
+
+     所以本版【彻底不再 parseFloat 任何自定义属性】，改用 getBoundingClientRect
+     读渲染后的真实像素。副作用是顺带修掉了另一个老坑：原来用 em 常量硬算时钟宽度，
+     靠"数格子"（cells+colons）推字距个数，v7 就栽在少算/多算了一格上。
+     现在量的是真实布局宽度，字体度量、字距、变量换算全自动包含，不可能数错。 */
+  const FILL = 0.97;                                 // 时钟（含秒区）最多占可用宽的 97%（留 3% 光边）
+
+  function fitClock() {
+    /* 可用宽：用 header 的【渲染后】左右 padding。
+       header 与 .clock 同属一个纵向 flex 流、同宽，所以它的 padding 就是时钟的可用内缩。
+       故意不走 --pad-x：读它拿到的是 token 流原文（"min(5.5vmin, 4.6vw)"），
+       parseFloat 得到 NaN —— 那正是下面 ★ 根因里让整个函数静默失效的东西。 */
+    let padX = 0;
+    if (headerEl) {
+      const hcs = getComputedStyle(headerEl);
+      padX = (parseFloat(hcs.paddingLeft) || 0) + (parseFloat(hcs.paddingRight) || 0);
+    }
+    const avail = stage.clientWidth - padX;
+    if (!(avail > 0)) return;                        // 窄到没有空间就不动字号，保持可读
+
+    /* 量当前真实渲染宽度，再按比例解出目标字号。
+       关键性质：时钟宽度对 font-size 是【严格线性】的 —— 格宽 .546em / .212em、
+       字距 .018em、秒区 .212em 全是 em，改字号只会等比缩放，所以：
+             目标字号 = 当前字号 × (能用的宽 / 现在的宽)
+       一次乘法就是精确解，不需要迭代，也不依赖任何估出来的 em 常量。
+
+       量之前必须先拆掉 .clock 上的 max-width:100% 和定位祖先 .view 的 transform：
+       前者会把 rect 夹到容器宽（半屏下正好把读数夹成 1920，看似"没溢出"，其实早裁了），
+       后者会让 rect 落在位移后的坐标系里。拆掉之后量到的才是时钟的自然宽度。 */
+    cellH.style.maxWidth = 'none';
+    const prevTf = stage.style.transform;
+    stage.style.transform = 'none';
+    const naturalW = cellH.getBoundingClientRect().width;   // 时钟自然宽（含秒区）
+    cellH.style.maxWidth = '';
+    stage.style.transform = prevTf;
+    if (!(naturalW > 0)) return;
+    // 当前字号（这是 font-size，getComputedStyle 返回的是真实像素，不是 token 流）
+    const currentFont = parseFloat(getComputedStyle(cellH).fontSize) || 0;
+    if (!(currentFont > 0)) return;
+
+    const scale = (avail * FILL) / naturalW;
+    const cap = 42 * Math.min(innerWidth, innerHeight) / 100;   // 高度方向上限
+    const target = Math.max(12, Math.min(cap, currentFont * scale));
+    root.style.setProperty('--digit-fill', target.toFixed(1) + 'px');
+  }
+  /* ---------- 布局：定时器统一驱动，不再挂任何事件冒泡 ----------
+     旧写法把重算挂在 window 的 transitionend 上，而进度条自己有 900ms 的 width
+     过渡会反复冒泡 transitionend，正在跑的 .view 动画被打断 → 动画只剩一帧。
+     现在只用定时器：模式切换后连算 3 次（0 / 120 / 380ms），覆盖 320ms 过渡；
+     resize 走去抖。逻辑简单，也不会自激。 */
+  let fitTimer = 0, modeTimers = [];
+  const scheduleFit = () => { clearTimeout(fitTimer); fitTimer = setTimeout(fitClock, 30); };
+  function relayoutNow() { fitClock(); layout(); }
+  /* 先【同步】算一次：宽度切换不参与动画（见 .view 的注释），所以点下按钮的瞬间
+     .view 的 clientWidth 已经是新值，fitClock() 立刻就能解出精确字号。
+     不这么做的话要等 60ms 后的第一次补算，会看到 1 帧的旧字号（实测 907.2 → 612 → 608）。
+     后面那三次定时器保留作兜底（万一将来父容器尺寸是异步确定的）。 */
+  function relayoutAfterModeChange() {
+    relayoutNow();
+    modeTimers.forEach(clearTimeout);
+    modeTimers = [60, 140, 380].map(ms => setTimeout(relayoutNow, ms));
+  }
+
+  /* ---------- 分段长度：目标 250% 原长，上限总宽 70% ----------
+     注意两件事：
+       1. 必须先扣掉缝隙占的宽度，否则整条会溢出（4K 下 7 条缝隙合计 83px ≈ 2.3%）
+       2. 顺序是"先把当前段拉到目标长度并压到 70% 上限，再按比例缩小其他段让它位"。
+          若先把所有段按比例算一遍，整条会溢出（8 段 × 平均 250% ≈ 236%）。 */
+  const totalMin = PERIODS.reduce((s, p) => s + (toMin(p.e) - toMin(p.s)), 0);
+  function layout() {
+    const cs = getComputedStyle(segsEl);
+    const gap = parseFloat(cs.columnGap || cs.gap) || 0;
+    // clientWidth 已含 padding 之外的内容宽；再扣掉 (段数-1) 个缝隙
+    const avail = segsEl.clientWidth - gap * Math.max(0, nodes.length - 1);
+    if (avail <= 0) return;
+    const base = nodes.map(n => avail * (n.dur / totalMin));
+    const iNow = nodes.findIndex(n => n.el.classList.contains('now'));
+    const want = base.map((w, i) => (i === iNow ? Math.min(w * GROW_TARGET, avail * GROW_CAP) : w));
+    const rest = want.reduce((a, w, i) => a + (i === iNow ? 0 : w), 0);
+    const k = iNow < 0 || rest <= 0 ? 1 : Math.max(0.02, (avail - want[iNow]) / rest);
+    nodes.forEach((n, i) => {
+      const w = i === iNow ? want[i] : want[i] * k;
+      n.el.style.setProperty('--w', w.toFixed(2) + 'px');
+      n.el.style.flexGrow = String(w);
+    });
+  }
+
+  /* ---------- 每秒推进 ---------- */
+  let t = toMin('19:29') * 60 + 8, prog = 0.30, nowSeg = null;
+  function tick() {
+    const hh = String(Math.floor(t / 3600)).padStart(2, '0');
+    const mm = String(Math.floor(t % 3600 / 60)).padStart(2, '0');
+    const ss = String(t % 60).padStart(2, '0');
+    paint(`${hh}:${mm}`, ss);
+
+    const now = Math.floor(t / 60);
+    let cur = null;
+    nodes.forEach(n => {
+      const isNow = now >= n.a && now < n.b;
+      n.el.classList.toggle('done', now >= n.b);
+      n.el.classList.toggle('now', isNow);
+      if (isNow) {
+        n.el.querySelector('.fill').style.width = (prog * 100).toFixed(2) + '%';
+        cur = n;
+      }
+    });
+    if (cur !== nowSeg) { nowSeg = cur; layout(); }   // 换段时重算长度
+
+    t = (t + 1) % 86400;
+    prog += 0.0011;
+    if (prog > 0.999) prog = 0;
+  }
+
+  paintDate(new Date(2026, 2, 12));
+  tick();
+  // 统一入口：定时器驱动，不挂任何事件冒泡（原因见上面 relayout 的注释）
+  requestAnimationFrame(relayoutNow);
+  addEventListener('resize', () => { scheduleFit(); setTimeout(relayoutNow, 40); });
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(relayoutNow);
+  setInterval(tick, 1000);
+
+  /* ---------- 显示模式：一个图标三态循环，纹理不同 ---------- */
+  const MODES = ['full', 'left', 'right'];
+  const fillEl = document.getElementById('modefill');
+  function paintMode() {
+    const m = root.dataset.half;
+    // full: 整块实心  |  left: 只填左半  |  right: 只填右半
+    if (m === 'full')       fillEl.innerHTML = '<rect class="st" x="4.2" y="6.2" width="15.6" height="11.6" rx="1.4"/>';
+    else if (m === 'left')  fillEl.innerHTML = '<rect class="st" x="4.2" y="6.2" width="7.2" height="11.6" rx="1.4"/>';
+    else                    fillEl.innerHTML = '<rect class="st" x="12.6" y="6.2" width="7.2" height="11.6" rx="1.4"/>';
+  }
+  function syncBtns() {
+    document.querySelectorAll('#devbar button').forEach(b => {
+      const a = b.dataset.act;
+      let on = false;
+      if (a === 'full' || a === 'left' || a === 'right') on = root.dataset.half === a;
+      else if (b.dataset.pal)  on = root.dataset.pal  === b.dataset.pal;
+      else if (b.dataset.sem)  on = root.dataset.sem  === b.dataset.sem;
+      else if (b.dataset.tint) on = root.dataset.tint === b.dataset.tint;
+      b.setAttribute('aria-pressed', String(on));
+    });
+  }
+  paintMode(); syncBtns();
+
+  document.getElementById('devbar').addEventListener('click', e => {
+    const btn = e.target.closest('button'); if (!btn) return;
+    if (btn.dataset.pal)  { root.dataset.pal  = btn.dataset.pal;  syncBtns(); return; }
+    if (btn.dataset.sem)  { root.dataset.sem  = btn.dataset.sem;  syncBtns(); return; }
+    if (btn.dataset.tint) { root.dataset.tint = btn.dataset.tint; syncBtns(); return; }
+    const a = btn.dataset.act;
+    if (a === 'theme') root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark';
+    if (a === 'mode') {
+      const i = MODES.indexOf(root.dataset.half);
+      root.dataset.half = MODES[(i + 1) % MODES.length];
+      paintMode();
+      relayoutAfterModeChange();     // 60/140/380ms 补算，覆盖 .view 的 320ms 过渡
+    }
+    if (a === 'prog') prog = Math.min(0.94, prog + 0.13);
+    syncBtns();
+  });
+})();
+</script>
+</body>
+</html>
