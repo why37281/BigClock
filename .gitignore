@@ -20,3 +20,7 @@ Thumbs.db
 # ---- 临时文件 ----
 COMMIT_MSG.txt
 *.tmp
+
+# 程序运行时在 exe 同目录生成的启动日志（排查用，不进仓库）
+bigclock.toml
+startup.log

@@ -23,11 +23,20 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+# 仅用于"启动失败时弹一个原生错误框"。
+# WebView2 建不起来时进程会直接退出，那时没有任何窗口可用来显示错误，
+# 只能靠系统 MessageBox。库很小，不会拖大体积。
+tinyfiledialogs = "3"
 
 # 发布版要小：去符号、开 LTO、单 codegen 单元
+#
+# 【刻意不开 panic = "abort"】
+# 开了它之后，任何 panic 都会被编译成 __fastfail 立即终止进程 ——
+# 表现就是"双击后转一下圈，进程没了，什么都不显示"（事件日志里是 0xc0000409）。
+# 这种"静默死亡"极难排查，宁可多占一点体积也要让 panic 走正常路径，
+# 至少能落到我们的 panic hook 里写进启动日志。
 [profile.release]
 opt-level = "s"
 lto = true
 codegen-units = 1
-panic = "abort"
 strip = true
