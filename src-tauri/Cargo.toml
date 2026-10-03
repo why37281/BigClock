@@ -20,6 +20,11 @@ dirs = "5"
 
 # 只有 Windows 才需要：显示器枚举 / 窗口定位 / 光标。
 # 用官方绑定而不是手写 extern，避免结构体 ABI 对不上导致读到垃圾数据。
+#
+# 注：windows-sys 里 GDI 那组功能的 feature 名可能有出入（有的版本是
+#     Win32_Graphics，有的是 Win32_Graphics_Gdi 更细的子项）。这里两个都列上了，
+#     Cargo 对重复功能名是合并的，不影响。万一报 "feature does not exist"，
+#     把不存在的那个删掉即可。
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
