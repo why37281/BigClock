@@ -107,8 +107,8 @@ body {
   -webkit-font-smoothing: antialiased;
   cursor: default;
 }
-/* 展示状态下 3 秒不动鼠标就隐藏光标（大屏必备）；由 JS 切换 class */
-body.hide-cursor, body.hide-cursor * { cursor: none !important; }
+/* 展示状态下由 WebView2 自己处理光标（全屏 + 鼠标静止时自动隐藏），
+   不再需要 Rust 侧轮询 GetCursorPos。这里只保证设置界面里光标正常。 */
 body.settings-open { cursor: default; }
 
 /* ===================== 半屏：宽度定值 + transform 位移 =====================
@@ -151,6 +151,10 @@ header { flex: 0 0 auto; padding: var(--pad-y) var(--pad-x) 0; }
   opacity: .82; pointer-events: none; white-space: nowrap;
   padding: 0 .6em;
 }
+/* ★ 必须显式写：上面的 display:flex 会盖掉 [hidden] 的 UA 规则（UA 里那条
+   display:none 优先级最低），不写这句 hidden 根本不管用 —— 表现就是
+   show_names=false 时段名照样显示出来。秒区那处踩过同一个坑。 */
+.seg .name[hidden] { display: none; }
 
 .seg {
   position: relative;
@@ -234,18 +238,35 @@ html[data-theme="dark"] .date { text-shadow: var(--ts, 0 .26vmin 1.1vmin rgba(0,
   white-space: nowrap;
 }
 
-/* ===================== 设置入口（平时隐形） ===================== */
-.dock {
-  position: fixed; right: 2.4vmin; bottom: 2.4vmin; z-index: 30;
+/* ===================== 控制条 =====================
+   这段是从 design-preview.html 的 #devbar 原样搬过来的：
+   半透明黑底 rgba(0,0,0,.66)、圆角 14px、blur(8px)、按钮 1px 白描边、
+   选中项用 outline 2px 白框。平时 opacity:0，鼠标移上去才浮现，不挡大屏。
+   刻意只留三项（主题 / 显示模式 / 设置）—— 对比度、底色这类
+   "调一次就不动"的挪进了设置面板。 */
+#devbar {
+  position: fixed; left: 2.4vmin; bottom: 2.4vmin; z-index: 50;
+  display: flex; align-items: center; gap: 6px;
+  font-family: system-ui, sans-serif; font-size: 14px;
+  background: rgba(0,0,0,.66); padding: 8px 10px; border-radius: 14px;
+  backdrop-filter: blur(8px); color: #fff;
   opacity: 0; transition: opacity .3s;
 }
-body:hover .dock { opacity: .75; }
-body.settings-open .dock { opacity: 0; pointer-events: none; }
-.dock button {
-  background: transparent; border: 0; padding: .6vmin; cursor: pointer;
-  color: var(--fg); display: flex;
+body:hover #devbar { opacity: .9; }
+body.settings-open #devbar { opacity: 0; pointer-events: none; }
+
+#devbar button {
+  font: inherit; color: #fff; background: transparent;
+  border: 1px solid rgba(255,255,255,.22); border-radius: 9px;
+  padding: 6px 9px; cursor: pointer; display: flex; align-items: center;
 }
-.dock svg { width: 3.2vmin; height: 3.2vmin; }
+#devbar button:hover { background: rgba(255,255,255,.16); }
+#devbar svg { width: 19px; height: 19px; stroke: #fff; fill: none; stroke-width: 1.7; stroke-linecap: round; }
+#devbar .sep { width: 1px; align-self: stretch; background: rgba(255,255,255,.2); margin: 2px 4px; }
+
+/* 显示模式：一个图标三态循环，纹理不同 */
+#mode svg { width: 26px; height: 26px; }
+#mode .st { fill: currentColor; }
 
 /* ===================== 设置面板 ===================== */
 .settings {

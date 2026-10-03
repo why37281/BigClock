@@ -47,22 +47,20 @@ export interface MonitorInfo {
   primary: boolean;
 }
 
-/** 配置校验问题（索引 -1 表示与具体时段无关） */
-export interface ValidationIssue {
-  index: number;
-  message: string;
-}
-
-/** get_config / config-changed 的返回：配置 + 它到底存在哪个文件里 + 显示器列表 */
+/** get_config / save_config / reload_config 的返回。
+ *  字段必须与 Rust 侧 commands::ConfigPayload 一致。 */
 export interface ConfigEnvelope {
   config: Config;
+  /** 配置文件到底在哪个路径（exe 同目录） */
   path: string;
-  explicit_path: boolean;
-  monitors: MonitorInfo[];
+  /** 文件当前原文：前端靠它轮询比对，也靠它区分"自己刚写的" */
+  raw: string;
   /** 后端归一化时的提示（例如"某字段写错已改用默认值"） */
   warnings: string[];
   /** 校验发现的问题；非空时后端拒绝保存 */
   issues: ValidationIssue[];
+  /** 配置文件是这次启动新建出来的 */
+  created: boolean;
 }
 
 /** 默认配置：作息表按用户要求只留一段 18:40–19:00，其余由用户在设置里自己加。 */
@@ -153,6 +151,12 @@ export function humanDuration(min: number): string {
 }
 
 /* ------------------------------------------------------------ 前端兜底校验 */
+
+/** 配置校验问题（索引 -1 表示与具体时段无关） */
+export interface ValidationIssue {
+  index: number;
+  message: string;
+}
 
 /**
  * 校验作息表。这里【故意宽松】：只拦真正会让界面出错的情况，

@@ -9,30 +9,20 @@ rust-version = "1.77"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# 【刻意保持极简】只留前端做不到的事：配置文件的读写与 TOML 解析。
+# 被删掉的依赖及原因：
+#   windows-sys  → 窗口几何切割、显示器枚举都搬去前端了（CSS + 官方 JS API）
+#   notify       → 热重载改成前端轮询文件文本，省掉防抖与跨线程切主线程
+#   dirs         → 用一个环境变量读 %APPDATA% 就够了
 [dependencies]
-tauri = { version = "2", features = [] }
+# devtools：release 版也能按 F12 打开控制台。
+# 让用户在自己机器上直接抓前端报错，比在无头环境里靠推测快得多。
+# 代价是体积略增，正式发布时可以去掉这个 feature。
+tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
-notify = "6"
-dirs = "5"
-
-# 只有 Windows 才需要：显示器枚举 / 窗口定位 / 光标。
-# 用官方绑定而不是手写 extern，避免结构体 ABI 对不上导致读到垃圾数据。
-#
-# 注：windows-sys 里 GDI 那组功能的 feature 名可能有出入（有的版本是
-#     Win32_Graphics，有的是 Win32_Graphics_Gdi 更细的子项）。这里两个都列上了，
-#     Cargo 对重复功能名是合并的，不影响。万一报 "feature does not exist"，
-#     把不存在的那个删掉即可。
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
-    "Win32_Foundation",
-    "Win32_Graphics",
-    "Win32_Graphics_Gdi",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_System_Threading",
-] }
 
 # 发布版要小：去符号、开 LTO、单 codegen 单元
 [profile.release]

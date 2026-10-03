@@ -1,17 +1,21 @@
 // ============================================================================
-// 配置：读 exe 同目录的 bigclock.toml + 宽松解析 + 校验 + 写回
+// 配置：读写 exe 同目录的 bigclock.toml
 //
-// 设计原则（按需求）：
-//   · 配置文件必须与 exe 同目录，必须是【纯文本、用户可编辑】
-//   · 解析失败绝不白屏：保留上一次有效配置，只把错误报到角落
-//   · 宽松解析：18:40 / 1840 / 全角 18：40 都认；end 允许 24:00
-//   · 写回式设置界面：界面改完直接写回同一个文本文件，存盘即生效
+// 【职责边界】这里只做前端做不到的事 —— 文件系统。
+//   · 读文件、写文件
+//   · 宽松解析时间（18:40 / 1840 / 全角 18：40 / 跨零点 / 24:00）
+//   · 校验（段名空、时间看不懂、区间重叠）
+//   · 解析失败时绝不让界面白屏：把错误报出去，由前端决定怎么提示
+//
+// 不在这里做的事（都搬前端了）：
+//   · 热重载监听（notify crate + 防抖 + 跨线程切主线程）→ 前端 1 秒轮询文件文本
+//   · 窗口几何、全屏、显示器枚举 → Tauri 官方 JS API
+//   · 光标隐藏 → WebView2 自己会处理
 // ============================================================================
 
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 // ---------------------------------------------------------------- 配置结构
 
@@ -23,8 +27,9 @@ fn d_tint() -> String { "cyan".into() }
 fn d_clock_format() -> String { "hm".into() }
 fn d_true() -> bool { true }
 fn d_false() -> bool { false }
+
+/// 默认作息表：按需求只留一段 18:40–19:00，其余由用户在设置界面自己加
 fn d_periods() -> Vec<Period> {
-    // 按用户要求：默认只留一段 18:40–19:00，其余由用户在设置界面自己加
     vec![Period { name: "晚自习".into(), start: "18:40".into(), end: "19:00".into() }]
 }
 
@@ -54,6 +59,7 @@ pub struct Period {
     pub end: String,
 }
 
+/// 所有字段都带默认值：配置文件里删掉某个字段不该让程序起不来
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -109,14 +115,14 @@ pub fn parse_time(raw: &str) -> Option<i64> {
         (a.trim().parse::<i64>().ok()?, b.trim().parse::<i64>().ok()?)
     } else {
         // 纯数字：1830 / 940 / 19
-        let d: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
-        if d.len() != s.len() || d.is_empty() || d.len() > 4 {
+        let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
+        if digits.len() != s.len() || digits.is_empty() || digits.len() > 4 {
             return None;
         }
-        if d.len() <= 2 {
-            (d.parse::<i64>().ok()?, 0)
+        if digits.len() <= 2 {
+            (digits.parse::<i64>().ok()?, 0)
         } else {
-            let p = format!("{:0>4}", d);
+            let p = format!("{:0>4}", digits);
             (p[0..2].parse::<i64>().ok()?, p[2..4].parse::<i64>().ok()?)
         }
     };
@@ -133,7 +139,7 @@ pub fn parse_time(raw: &str) -> Option<i64> {
     Some(h * 60 + m)
 }
 
-fn fmt_time(min: i64) -> String {
+pub fn fmt_time(min: i64) -> String {
     let m = min.rem_euclid(1440);
     format!("{:02}:{:02}", m / 60, m % 60)
 }
@@ -159,20 +165,21 @@ pub fn normalize(mut cfg: Config) -> Normalized {
     let mut warnings = Vec::new();
     let mut issues = Vec::new();
 
-    // ---- 枚举值兜底（配置文件里写错不该让程序崩）----
-    let fix = |v: &mut String, allowed: &[&str], def: &str, what: &str, w: &mut Vec<String>| {
+    // 枚举值兜底：配置文件里写错不该让程序崩
+    fn fix(v: &mut String, allowed: &[&str], def: &str, what: &str, w: &mut Vec<String>) {
         if !allowed.contains(&v.as_str()) {
-            w.push(format!("{what}「{}」不认识，已改用「{def}」", v));
+            w.push(format!("{what}「{v}」不认识，已改用「{def}」"));
             *v = def.to_string();
         }
-    };
+    }
     fix(&mut cfg.theme, &["dark", "light"], "dark", "主题 theme", &mut warnings);
     fix(&mut cfg.mode, &["fullscreen", "window"], "fullscreen", "显示模式 mode", &mut warnings);
     fix(&mut cfg.half, &["full", "left", "right"], "full", "半屏 half", &mut warnings);
     fix(&mut cfg.contrast, &["A", "A2", "B", "C"], "A2", "对比度 contrast", &mut warnings);
     fix(&mut cfg.tint, &["neutral", "cyan", "warm"], "cyan", "底色 tint", &mut warnings);
     fix(&mut cfg.clock_format, &["hm", "hms"], "hm", "时长格式 clock_format", &mut warnings);
-    // 亮色主题没有对比度档位（那套值只对暗色有意义）
+
+    // 亮色主题没有对比度档位（那套灰阶只对暗色有意义）
     if cfg.theme == "light" && cfg.contrast != "A2" {
         cfg.contrast = "A2".into();
     }
@@ -211,7 +218,6 @@ pub fn normalize(mut cfg: Config) -> Normalized {
 
         out.push(Period { name, start: fmt_time(a), end: fmt_time(b2) });
         spans.push((a, b2));
-        let _ = idx;
     }
 
     // 重叠检测（按展开后的区间）
@@ -222,7 +228,10 @@ pub fn normalize(mut cfg: Config) -> Normalized {
         if spans[ci].0 < spans[pi].1 {
             issues.push(Issue {
                 index: ci as i64,
-                message: format!("与「{}」时间重叠", out.get(pi).map(|p| p.name.as_str()).unwrap_or("上一段")),
+                message: format!(
+                    "与「{}」时间重叠",
+                    out.get(pi).map(|p| p.name.as_str()).unwrap_or("上一段")
+                ),
             });
         }
     }
@@ -240,11 +249,10 @@ pub fn normalize(mut cfg: Config) -> Normalized {
 
 // ---------------------------------------------------------------- 路径
 
-/// 候选路径（按优先级）：
-///   1. 环境变量 BIGCLOCK_CONFIG（方便测试和多实例）
+/// 配置路径，按优先级：
+///   1. 环境变量 BIGCLOCK_CONFIG（方便测试与多实例）
 ///   2. exe 同目录/bigclock.toml        ← 需求：与打包后的可执行文件同目录
-///   3. 工作目录/bigclock.toml
-///   4. 用户配置目录/BigClock/bigclock.toml（exe 目录不可写时的兜底，例如装在 Program Files）
+///   3. 用户配置目录/BigClock/（exe 目录不可写时兜底，例如装在 Program Files）
 pub fn resolve_config_path() -> (PathBuf, bool) {
     if let Ok(p) = std::env::var("BIGCLOCK_CONFIG") {
         if !p.trim().is_empty() {
@@ -259,18 +267,19 @@ pub fn resolve_config_path() -> (PathBuf, bool) {
             }
         }
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        let p = cwd.join("bigclock.toml");
-        if p.exists() || dir_writable(&cwd) {
-            return (p, false);
-        }
-    }
-    if let Some(dir) = dirs::config_dir() {
+    if let Some(dir) = dirs_config_dir() {
         let d = dir.join("BigClock");
         let _ = fs::create_dir_all(&d);
         return (d.join("bigclock.toml"), false);
     }
     (PathBuf::from("bigclock.toml"), false)
+}
+
+/// 不引 dirs crate，直接问系统要 %APPDATA%（这样少一个依赖）
+fn dirs_config_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join(".config")))
 }
 
 fn dir_writable(dir: &Path) -> bool {
@@ -284,7 +293,7 @@ fn dir_writable(dir: &Path) -> bool {
     }
 }
 
-/// 默认配置文件内容。periods 段单独拼，保证空表也能正确生成。
+/// 默认配置文件内容（带中文注释，用户可以直接拿记事本改）
 pub fn default_config_text() -> String {
     let base = Config::default();
     let mut s = String::new();
@@ -299,6 +308,7 @@ pub fn default_config_text() -> String {
     s.push_str("# theme   : dark（晚自习）/ light（白天开灯）\n");
     s.push_str("# mode    : fullscreen（全屏展示）/ window（窗口配置）\n");
     s.push_str("# half    : full（整屏）/ left（左半屏）/ right（右半屏）—— 黑板挡哪边选哪边\n");
+    s.push_str("#           窗口始终铺满整块屏，半屏只是把内容挪到那一半，另一半留黑\n");
     s.push_str("# screen  : 第几块显示器，0 = 主屏\n");
     s.push_str("# contrast: A | A2 | B | C —— 只对暗色主题有效，越往后越柔\n");
     s.push_str("#           A 最清晰 19.5:1 / A2 推荐 15.7:1 / B 13.9:1 / C 最柔 12.3:1\n");
@@ -328,7 +338,7 @@ pub fn default_config_text() -> String {
     s.push_str("# 时间写法很宽松：18:40 / 1840 / 全角 18：40 都认；\n");
     s.push_str("# 跨零点也支持，例如 start = \"23:30\", end = \"00:10\"。\n");
     s.push_str("# 空档如果开了 gap_minutes，会自动补成「课间」。\n");
-    s.push_str("# 在设置界面里改完保存，这里会被自动重写（注释会丢，属正常）。\n\n");
+    s.push_str("# 在设置界面里改完保存，这个文件会被重写（注释会丢，属正常）。\n\n");
     for p in &base.periods {
         s.push_str("[[periods]]\n");
         s.push_str(&format!("name  = \"{}\"\n", p.name));
@@ -345,7 +355,6 @@ pub struct Loaded {
     pub raw: String,
     pub warnings: Vec<String>,
     pub issues: Vec<Issue>,
-    /// 本次是"文件不存在，新建了默认配置"
     pub created: bool,
 }
 
@@ -373,9 +382,8 @@ pub fn load_or_create(path: &Path) -> Result<Loaded, String> {
     Ok(Loaded { config: n.config, raw, warnings: n.warnings, issues: n.issues, created: false })
 }
 
-/// 写配置。先写临时文件再原子改名，避免"存盘存到一半"被读走。
-/// 返回写回的文本内容（热重载要拿它做自写判定）。
-pub fn save(path: &Path, cfg: &Config) -> Result<String, String> {
+/// 写配置。先写临时文件再原子改名，避免"存到一半"被读到。
+pub fn save(path: &Path, cfg: &Config) -> Result<(), String> {
     let text = toml::to_string_pretty(cfg).map_err(|e| format!("序列化配置失败：{e}"))?;
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
@@ -385,56 +393,10 @@ pub fn save(path: &Path, cfg: &Config) -> Result<String, String> {
     match fs::rename(&tmp, path) {
         Ok(_) => {}
         Err(_) => {
-            // 某些情况下（目标被占用/跨盘）改名会失败，直接覆盖写
+            // 目标被占用/跨盘时改名会失败，退化成直接覆盖
             fs::write(path, &text).map_err(|e| format!("写配置失败：{e}"))?;
             let _ = fs::remove_file(&tmp);
         }
     }
-    Ok(text)
-}
-
-// ---------------------------------------------------------------- 热重载
-
-pub struct Watcher {
-    _inner: Option<notify::RecommendedWatcher>,
-}
-
-/// 监听配置文件所在目录（监听文件本身在"编辑器原子改名"时会丢事件）。
-/// 回调在【独立线程】上被调用，调用方自己负责切回主线程。
-pub fn watch<F>(path: &Path, mut on_change: F) -> Watcher
-where
-    F: FnMut() + Send + 'static,
-{
-    use notify::{RecursiveMode, Watcher as _};
-
-    let dir = match path.parent() {
-        Some(d) => d.to_path_buf(),
-        None => return Watcher { _inner: None },
-    };
-
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
-    let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        if res.is_ok() {
-            let _ = tx.send(());
-        }
-    });
-
-    let mut watcher = match watcher {
-        Ok(w) => w,
-        Err(_) => return Watcher { _inner: None },
-    };
-    if watcher.watch(&dir, RecursiveMode::NonRecursive).is_err() {
-        return Watcher { _inner: None };
-    }
-
-    std::thread::spawn(move || {
-        // 500ms 防抖：编辑器存盘常常连续触发好几个事件
-        while rx.recv().is_ok() {
-            std::thread::sleep(Duration::from_millis(500));
-            while rx.try_recv().is_ok() {}
-            on_change();
-        }
-    });
-
-    Watcher { _inner: Some(watcher) }
+    Ok(())
 }

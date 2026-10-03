@@ -1,28 +1,51 @@
 // ============================================================================
-// 前端能调的指令。全部很薄：状态在 AppState 里，窗口控制在 display.rs 里。
+// 前端可调的指令 —— 只有"前端做不到的事"才在这里
+//
+//   配置文件读写（前端碰不到 exe 同目录的文件系统）
+//   打开配置文件所在文件夹
+//   退出程序
+//
+// 不在这里的（都搬前端了）：
+//   全屏/窗口形态 / 显示器枚举 → Tauri 官方 JS API
+//   热重载                    → 前端轮询配置文件文本
+//   光标隐藏                  → WebView2 自己会处理
 // ============================================================================
 
-use std::sync::atomic::Ordering;
+use tauri::{AppHandle, State};
 
-use tauri::{AppHandle, Emitter, Manager, State};
+use crate::config::{self, Config, Issue};
+use crate::AppState;
 
-use crate::config::{self, Config};
-use crate::display;
-use crate::{hash_of, AppState, ConfigPayload};
-
-/// 前端启动时拉一次全量状态（配置 + 文件路径 + 显示器列表 + 警告）
-#[tauri::command]
-pub fn get_config(state: State<'_, AppState>) -> ConfigPayload {
-    state.payload()
+/// 推给前端的配置包：配置本身 + 它存在哪个文件里 + 提示与校验问题
+#[derive(Clone, serde::Serialize)]
+pub struct ConfigPayload {
+    pub config: Config,
+    pub path: String,
+    /// 配置文件里读到/写出的原始文本，前端靠它做轮询比对与自写判定
+    pub raw: String,
+    pub warnings: Vec<String>,
+    pub issues: Vec<Issue>,
+    /// 配置文件是这次启动新建出来的
+    pub created: bool,
 }
 
-/// 设置界面保存：校验 → 归一化 → 写回同目录文本文件 → 通知界面刷新
+/// 前端启动时拉一次
 #[tauri::command]
-pub fn save_config(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    config: Config,
-) -> Result<ConfigPayload, String> {
+pub fn get_config(state: State<'_, AppState>) -> ConfigPayload {
+    let cfg = state.config.lock().unwrap().clone();
+    ConfigPayload {
+        config: cfg,
+        path: state.path.to_string_lossy().to_string(),
+        raw: state.raw.lock().unwrap().clone(),
+        warnings: state.warnings.lock().unwrap().clone(),
+        issues: state.issues.lock().unwrap().clone(),
+        created: state.created,
+    }
+}
+
+/// 设置界面保存：校验 → 归一化 → 写回同目录文本文件
+#[tauri::command]
+pub fn save_config(state: State<'_, AppState>, config: Config) -> Result<ConfigPayload, String> {
     let n = config::normalize(config);
 
     // 有明显错误就不写盘 —— 宁可让用户改对，也不要写进去一个坏文件
@@ -30,101 +53,75 @@ pub fn save_config(
         let msg = n
             .issues
             .iter()
-            .map(|i| if i.index >= 0 { format!("第 {} 段：{}", i.index + 1, i.message) } else { i.message.clone() })
+            .map(|i| {
+                if i.index >= 0 {
+                    format!("第 {} 段：{}", i.index + 1, i.message)
+                } else {
+                    i.message.clone()
+                }
+            })
             .collect::<Vec<_>>()
             .join("；");
         return Err(msg);
     }
 
-    let text = config::save(&state.path, &n.config)?;
+    config::save(&state.path, &n.config)?;
+    let raw = std::fs::read_to_string(&state.path).unwrap_or_default();
 
     *state.config.lock().unwrap() = n.config.clone();
-    *state.last_hash.lock().unwrap() = hash_of(&text);
-    *state.warnings.lock().unwrap() = n.warnings;
-    *state.issues.lock().unwrap() = n.issues;
+    *state.raw.lock().unwrap() = raw.clone();
+    *state.warnings.lock().unwrap() = n.warnings.clone();
+    *state.issues.lock().unwrap() = n.issues.clone();
 
-    // 显示形态相关的变化立刻生效
-    display::apply_mode(&app, &n.config.mode, &n.config.half, n.config.screen)?;
-
-    let payload = state.payload();
-    let _ = app.emit("config-changed", payload.clone());
-    Ok(payload)
+    Ok(ConfigPayload {
+        config: n.config,
+        path: state.path.to_string_lossy().to_string(),
+        raw,
+        warnings: n.warnings,
+        issues: n.issues,
+        created: false,
+    })
 }
 
-/// 外部改了文件之后手动重新读一遍
+/// 只读回配置文件的原文。前端每秒轮询它来判断"文件被外部改了吗" ——
+/// 比读整个配置包轻，也避免每次轮询都触发一次解析。
 #[tauri::command]
-pub fn reload_config(app: AppHandle, state: State<'_, AppState>) -> Result<ConfigPayload, String> {
+pub fn raw_config(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let text = std::fs::read_to_string(&state.path).map_err(|e| format!("读配置失败：{e}"))?;
-    let parsed: Config = toml::from_str(&text).map_err(|e| format!("配置格式有误：{e}"))?;
-    let n = config::normalize(parsed);
-
-    *state.config.lock().unwrap() = n.config.clone();
-    *state.last_hash.lock().unwrap() = hash_of(&text);
-    *state.warnings.lock().unwrap() = n.warnings;
-    *state.issues.lock().unwrap() = n.issues;
-
-    let payload = state.payload();
-    let _ = app.emit("config-changed", payload.clone());
-    Ok(payload)
+    Ok(serde_json::json!({ "raw": text }))
 }
 
+/// 前端看到文件变了（轮询发现文本不同）之后调它，拿到解析结果
 #[tauri::command]
-pub fn list_monitors() -> Vec<crate::win::Monitor> {
-    display::list_monitors()
-}
+pub fn reload_config(state: State<'_, AppState>) -> Result<ConfigPayload, String> {
+    let raw = std::fs::read_to_string(&state.path).map_err(|e| format!("读配置失败：{e}"))?;
 
-/// 改显示形态（整屏 / 左半屏 / 右半屏 / 窗口）
-#[tauri::command]
-pub fn apply_display(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    mode: String,
-    half: String,
-    screen: u32,
-) -> Result<(), String> {
-    // 快捷键直接改形态时，也要把配置同步过去，免得两边不一致
-    {
-        let mut cfg = state.config.lock().unwrap();
-        cfg.mode = mode.clone();
-        cfg.half = half.clone();
-        cfg.screen = screen;
-    }
-    display::apply_mode(&app, &mode, &half, screen)
-}
-
-/// 键盘快捷键用：只切"整屏 ⇄ 窗口"，全屏时按 Esc 也走这里
-#[tauri::command]
-pub fn set_fullscreen(app: AppHandle, state: State<'_, AppState>, on: bool) -> Result<(), String> {
-    let (mode, half, screen) = {
-        let cfg = state.config.lock().unwrap();
-        (cfg.mode.clone(), cfg.half.clone(), cfg.screen)
-    };
-    let mode = if on { "fullscreen" } else { "window" }.to_string();
-    let half = if on { half } else { "full".to_string() };
-    {
-        let mut cfg = state.config.lock().unwrap();
-        cfg.mode = mode.clone();
-        cfg.half = half.clone();
-    }
-    display::apply_mode(&app, &mode, &half, screen)
-}
-
-/// 窗口当前物理矩形 —— 实测验收用（自动化脚本读它来核对半屏定位）
-#[tauri::command]
-pub fn window_rect(app: AppHandle) -> Option<display::WindowRect> {
-    display::window_rect(&app)
-}
-
-/// 设置界面开着时别藏光标；关掉就恢复自动隐藏
-#[tauri::command]
-pub fn set_cursor_hidden(state: State<'_, AppState>, enabled: bool) {
-    state.cursor_hide_enabled.store(enabled, Ordering::Relaxed);
-    if !enabled {
-        state.cursor.show();
+    match toml::from_str::<Config>(&raw) {
+        Ok(parsed) => {
+            let n = config::normalize(parsed);
+            *state.config.lock().unwrap() = n.config.clone();
+            *state.raw.lock().unwrap() = raw.clone();
+            *state.warnings.lock().unwrap() = n.warnings.clone();
+            *state.issues.lock().unwrap() = n.issues.clone();
+            Ok(ConfigPayload {
+                config: n.config,
+                path: state.path.to_string_lossy().to_string(),
+                raw,
+                warnings: n.warnings,
+                issues: n.issues,
+                created: false,
+            })
+        }
+        Err(e) => {
+            // 解析失败：保留上一次有效配置，只把错误报给前端
+            let msg = format!("配置文件格式有误，仍在使用上一次的有效配置：{e}");
+            *state.warnings.lock().unwrap() = vec![msg.clone()];
+            Err(msg)
+        }
     }
 }
 
-/// 打开配置文件所在文件夹（并在可能的情况下选中它）
+/// 打开配置文件所在文件夹（并尽量选中它）
 #[tauri::command]
 pub fn reveal_config(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
@@ -132,12 +129,13 @@ pub fn reveal_config(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
     if !path.exists() {
         return Err(format!("配置文件不存在：{}", path.display()));
     }
-    // 优先用资源管理器选中该文件；失败就退化成打开所在目录
     if cfg!(windows) {
-        let sel = std::process::Command::new("explorer")
+        // 优先用资源管理器选中该文件
+        if std::process::Command::new("explorer")
             .arg(format!("/select,{}", path.display()))
-            .spawn();
-        if sel.is_ok() {
+            .spawn()
+            .is_ok()
+        {
             return Ok(());
         }
     }
@@ -147,9 +145,17 @@ pub fn reveal_config(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
         .map_err(|e| e.to_string())
 }
 
-/// 退出程序（快捷键用）
+/// 退出程序
 #[tauri::command]
-pub fn quit_app(app: AppHandle, state: State<'_, AppState>) {
-    state.cursor.show();
+pub fn quit_app(app: AppHandle) {
     app.exit(0);
+}
+
+/// 自检回传（仅调试用）。
+/// webview 那边没法直接把 eval 的返回值交出来，所以让它 invoke 这个命令，
+/// 把 window.__selfcheck 之类的内容存进状态，再用 /selfcheck 读出来。
+/// 这是排查"前端整块没跑起来"的关键手段：能区分"module 没加载"与"抛异常"。
+#[tauri::command]
+pub fn selfcheck_report(state: State<'_, AppState>, data: serde_json::Value) {
+    *state.selfcheck.lock().unwrap() = data;
 }

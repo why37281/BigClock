@@ -22,16 +22,23 @@
 
 ---
 
-## ⚠️ 当前状态（务必先读）
+## ⚠️ 构建时最容易踩的坑（务必先读）
 
-| 部分 | 状态 |
-|---|---|
-| **前端**（显示、进度条、字号自适应、主题、设置界面） | ✅ 已完成，**65 项自动化检查全通过**（真实 Chromium + Tauri 后端模拟，覆盖配置加载→渲染→改作息表→保存写回整条链路） |
-| **Rust 后端**（配置读写/热重载、Win32 窗口控制、快捷键、单实例） | ⚠️ **代码已写完，但尚未通过编译器验证** |
-| **打包 / 发布** | ⏳ 未开始 |
+**必须用 `cargo tauri build`，不能用 `cargo build`。**
 
-也就是说：**界面部分可以直接在浏览器里跑起来看**（见下方「只看界面」），
-但**还没有编译出可用的 exe**。Rust 部分首次编译大概率还需要修几个类型/API 错误。
+这两个命令产出的 exe 看起来一样，行为却完全不同：
+
+| 命令 | webview 加载的东西 | 结果 |
+|---|---|---|
+| `cargo build --release` | **`devUrl`（http://localhost:5183）** | 页面一片空白、什么都不动，而且**完全静默不报错** |
+| `cargo tauri build` | `frontendDist`（打进 exe 的 `dist/`） | 正常 |
+
+原因：`cargo build` 走的是 dev 模式，`tauri-build` 会把 `tauri.conf.json` 里的
+`devUrl` 编进去而不是 `frontendDist`。开发服务器没开时，WebView2 加载的是
+浏览器的"无法连接"错误页 —— 窗口在、标题在、`eval` 也能跑，但你的前端一行都不执行。
+排查时极容易误判成"CSP 挡了""资源没打包""字体路径错了"。
+
+（这个坑实际花了很久才定位，详见 `BUG-交接文档.md` 末尾。）
 
 ---
 
@@ -60,12 +67,17 @@ npm run dev          # 浏览器打开 http://localhost:5183
 
 ```powershell
 npm install
-npm run build                 # 先出前端产物到 dist/
 cd src-tauri
-cargo build --release         # 首次要拉 ~400 个 crate，10 分钟以上
+cargo tauri build             # ← 注意是 tauri build，它会自己先跑 npm run build
 ```
 
-产物：`src-tauri\target\release\bigclock.exe`
+产物：
+
+- `src-tauri\target\release\bigclock.exe` —— 便携版可执行文件
+- `src-tauri\target\release\bundle\nsis\BigClock_0.1.0_x64-setup.exe` —— 安装包
+
+exe 可以直接拷到别的机器上用（那台机器需要 WebView2 运行时）。
+首次运行会在 exe 同目录生成 `bigclock.toml`。
 
 ---
 
@@ -125,7 +137,24 @@ end   = "19:00"
 | `Esc` | 退出全屏（设置开着时是关闭设置） |
 | `T` | 暗色 ⇄ 亮色 |
 
-鼠标 3 秒不动会自动隐藏光标；设置面板打开时不隐藏。
+左下角的控制条平时是隐形的，鼠标移上去才浮现，里面是 **主题 / 显示模式 / 设置** 三个按钮。
+显示模式是一个图标三态循环：整屏 → 左半屏 → 右半屏，图案跟着变。
+
+---
+
+## 设计要点
+
+**半屏不切窗口。** 窗口始终铺满整块显示器（`setFullscreen`），
+"左半屏/右半屏"纯粹是 CSS —— `.view` 的 `width:50%` + `translateX`，
+把内容挪到那一半，另一半留黑。这和 `design-preview.html` 里的做法完全一致。
+
+这么做的好处：不必跟系统的最大化状态、窗口边框、DPI 缩放打架
+（切成半个窗口时，`set_size` 设的是内容区、带边框会差一圈；
+最大化状态下改尺寸会被系统改回去）。视觉上单显示器和双显示器都等价。
+
+**字号自适应**量的是真实渲染宽度，再按比例一次乘法解出目标字号 ——
+时钟宽度对 `font-size` 严格线性，所以这是精确解，不需要迭代。
+`src/fit.ts` 里记着三条硬规则和一个值得知道的坑。
 
 ---
 
@@ -133,28 +162,49 @@ end   = "19:00"
 
 ```
 BigClock/
-├─ index.html              前端入口
+├─ index.html              前端入口（含一段内联自检脚本，见下）
 ├─ src/
-│  ├─ main.ts              启动、定时器、事件绑定、设置面板
+│  ├─ main.ts              启动、控制条、定时器、设置面板、热重载轮询
 │  ├─ time.ts              整分对齐时钟
 │  ├─ segments.ts          分段计算：宽度分配、三态、拉长规则
 │  ├─ render.ts            逐位定宽数字渲染 + 局部 DOM 更新
 │  ├─ fit.ts               时钟字号自适应
 │  ├─ config.ts            配置类型 + 宽松时间解析 + 兜底校验
-│  ├─ styles.css           全部样式（含配色令牌）
+│  ├─ styles.css           全部样式（含配色令牌与控制条）
 │  └─ fonts/               内嵌字体
 ├─ src-tauri/
-│  ├─ src/main.rs          启动、状态、热重载装配
-│  ├─ src/config.rs        配置读写 + 宽松解析 + 校验 + notify 监听
-│  ├─ src/display.rs       Win32 显示器枚举 + 整屏/半屏定位
-│  ├─ src/commands.rs      前端可调指令
-│  ├─ src/cursor.rs        光标自动隐藏
+│  ├─ src/main.rs          启动、状态管理
+│  ├─ src/config.rs        配置读写 + 宽松解析 + 校验
+│  ├─ src/commands.rs      前端可调指令（配置读写 / 打开目录 / 退出）
+│  ├─ src/single_instance.rs  命名互斥体
+│  ├─ src/debug_server.rs  仅测试时开启的只读自省端口（见下）
 │  └─ tauri.conf.json
+├─ scripts/build.ps1       构建脚本（内部走 cargo tauri build）
 ├─ design-preview.html     最早的设计稿（静态 HTML，保留作参考，不参与打包）
-├─ BUG-交接文档.md          字号不重算那个 bug 的完整根因记录
+├─ BUG-交接文档.md          字号不重算那个 bug 与构建模式坑的完整记录
 ├─ 实施计划.md              整体方案与验收标准
-└─ .preview/               开发期自动化验收脚本（浏览器驱动，不进仓库）
+└─ .preview/               开发期自动化验收脚本（不进仓库）
 ```
+
+### Rust 侧为什么这么小
+
+只做**前端做不到的事**：读 exe 同目录的配置文件、宽松解析时间、校验、
+单实例。窗口形态走 Tauri 官方 JS API，热重载是前端每秒轮询文件原文，
+半屏是 CSS。所以三个依赖都省掉了（`windows-sys` / `notify` / `dirs`），
+代码量比初版少了一半。
+
+### 排查前端时的自检通道
+
+- `index.html` 顶部有一段内联脚本，把资源加载失败和 JS 异常记进 `window.__selfcheck`
+- 设了环境变量 `BIGCLOCK_DEBUG_PORT` 时，程序会开一个**只监听 127.0.0.1 的只读** HTTP 端口：
+  - `/state` 当前生效的配置、是否全屏
+  - `/why` 让 webview 自述：当前 URL、`window.__selfcheck`、DOM 里有没有渲染出时钟
+  - `/raw` 配置文件原文
+
+  不设这个环境变量时这套代码一行都不跑，端口也不存在。
+
+  `/why` 是靠 `eval_with_callback` 实现的 —— 注意 Windows 上 `eval()` 是**不回传返回值**的，
+  排查时用 `eval` 拿结果会一直拿到空，这是个很容易踩的坑。
 
 ---
 

@@ -3,7 +3,7 @@
    ========================================================================== */
 
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { availableMonitors, getCurrentWindow } from "@tauri-apps/api/window";
 
 import {
   cloneConfig,
@@ -45,9 +45,7 @@ const dom = {
     theme: $("f-theme") as HTMLSelectElement,
     contrast: $("f-contrast") as HTMLSelectElement,
     tint: $("f-tint") as HTMLSelectElement,
-    sem: $("f-sem") as HTMLSelectElement,
     mode: $("f-mode") as HTMLSelectElement,
-    half: $("f-half") as HTMLSelectElement,
     screen: $("f-screen") as HTMLSelectElement,
     clockFormat: $("f-clockfmt") as HTMLSelectElement,
     title: $("f-title") as HTMLInputElement,
@@ -60,9 +58,8 @@ const dom = {
 
 let cfg: Config = defaultConfig();
 let cfgPath = "";
-let monitors: ConfigEnvelope["monitors"] = [];
-/** "语义色"开关：配置里没有这个字段（配色令牌已定稿），属于纯展示层偏好 */
-let semOn = true;
+/** 语义色（当前段用青还是纯灰）：只由配置文件的 sem 字段控制，界面上不再给开关 */
+const semOn = true;
 
 let segments: Segment[] = [];
 let nowIndex = -1;
@@ -73,6 +70,15 @@ const fitter = new ClockFitter(renderer.viewEl, renderer.clockEl, renderer.heade
 
 const BASE_TITLE = "BigClock";
 document.title = BASE_TITLE;
+
+/* ------------------------------------------------------------------ 自检
+   把"前端确实跑起来了"这件事写到 document.title 上。
+   做端到端验收时不用开 devtools、也不用抓控制台 —— Rust 侧读窗口标题就知道
+   module 到底加载成功没有。这是排查"整块前端没跑起来"最省事的一招。 */
+function markSelfcheck(stage: string, detail = ""): void {
+  const tag = `${BASE_TITLE} | ${stage}${detail ? " | " + detail : ""}`;
+  document.title = tag;
+}
 
 /* ------------------------------------------------------------------ 应用配置 */
 
@@ -98,6 +104,7 @@ function repaint(force = false): void {
   const key = `${now.getHours()}:${now.getMinutes()}`;
 
   applyTheme(cfg);
+  paintModeIcon(cfg.half);
   renderer.setTitle(cfg.title);
   // 秒区的显隐会改变时钟总宽 → 必须重量一次字号，否则大小对不上
   const secChanged = renderer.setShowSeconds(cfg.clock_format === "hms");
@@ -184,7 +191,6 @@ function openSettings(): void {
   fillForm(editing);
   dom.settings.hidden = false;
   document.body.classList.add("settings-open");
-  void invoke("set_cursor_hidden", { enabled: false });
   renderPeriodRows();
   markDirty(false);
   dom.status.textContent = cfgPath ? "" : "未能确定配置文件路径";
@@ -199,7 +205,6 @@ function closeSettings(force = false): void {
   document.body.classList.remove("settings-open");
   editing = null;
   issuesByIndex.clear();
-  void invoke("set_cursor_hidden", { enabled: true });
 }
 
 function fillForm(c: Config): void {
@@ -207,34 +212,46 @@ function fillForm(c: Config): void {
   dom.f.contrast.value = c.theme === "light" ? "A2" : c.contrast;
   dom.f.contrast.disabled = c.theme === "light";
   dom.f.tint.value = c.tint;
-  dom.f.sem.value = semOn ? "on" : "off";
   dom.f.mode.value = c.mode;
-  dom.f.half.value = c.half;
   dom.f.clockFormat.value = c.clock_format;
   dom.f.title.value = c.title;
   dom.f.barEnabled.value = String(c.bar.enabled);
   dom.f.barNames.value = String(c.bar.show_names);
   dom.f.barGap.value = String(c.bar.gap_minutes);
-  fillScreens(c.screen);
+  void fillScreens(c.screen);
   dom.cfgPath.textContent = cfgPath || "（未确定）";
 }
 
-function fillScreens(current: number): void {
+/**
+ * 显示器下拉。用 Tauri 官方的 availableMonitors()，不再自己写 Win32 枚举。
+ * 拿不到（浏览器里直接开前端）就退化成"显示器 1/2"。
+ */
+async function fillScreens(current: number): Promise<void> {
   dom.f.screen.textContent = "";
-  if (!monitors.length) {
+  let list: { name: string | null; size: { width: number; height: number } }[] = [];
+  try {
+    list = await availableMonitors();
+  } catch {
+    list = [];
+  }
+
+  if (!list.length) {
     const o = document.createElement("option");
     o.value = String(current);
     o.textContent = `显示器 ${current + 1}`;
     dom.f.screen.appendChild(o);
+    dom.f.screen.value = String(current);
     return;
   }
-  for (const m of monitors) {
+
+  list.forEach((m, i) => {
     const o = document.createElement("option");
-    o.value = String(m.index);
-    o.textContent = `${m.index + 1}. ${m.name} · ${m.width}×${m.height}${m.primary ? "（主屏）" : ""}`;
+    o.value = String(i);
+    const label = m.name && m.name.trim() ? m.name.trim() : `显示器 ${i + 1}`;
+    o.textContent = `${i + 1}. ${label} · ${m.size.width}×${m.size.height}`;
     dom.f.screen.appendChild(o);
-  }
-  dom.f.screen.value = String(current);
+  });
+  dom.f.screen.value = String(Math.min(current, list.length - 1));
 }
 
 /** 表单 → editing（每次控件变动都调用） */
@@ -244,7 +261,6 @@ function readForm(): void {
   editing.contrast = dom.f.contrast.value as Config["contrast"];
   editing.tint = dom.f.tint.value as Config["tint"];
   editing.mode = dom.f.mode.value as Config["mode"];
-  editing.half = dom.f.half.value as Config["half"];
   editing.screen = Number(dom.f.screen.value) || 0;
   editing.clock_format = dom.f.clockFormat.value as Config["clock_format"];
   editing.title = dom.f.title.value;
@@ -252,13 +268,12 @@ function readForm(): void {
   editing.bar.show_names = dom.f.barNames.value === "true";
   editing.bar.gap_minutes = dom.f.barGap.value === "true";
   editing.periods = periodsDraft.map((p) => ({ ...p }));
-  semOn = dom.f.sem.value === "on";
 }
 
 function isDirty(): boolean {
   if (!editing) return false;
   readForm();
-  return JSON.stringify(editing) !== JSON.stringify(cfg) || semOn !== (document.documentElement.dataset.sem === "on");
+  return JSON.stringify(editing) !== JSON.stringify(cfg);
 }
 
 function markDirty(dirty: boolean): void {
@@ -439,7 +454,6 @@ async function saveSettings(): Promise<void> {
     dom.settings.hidden = true;
     document.body.classList.remove("settings-open");
     editing = null;
-    void invoke("set_cursor_hidden", { enabled: true });
     await refitAfterLayout();
   } catch (e) {
     toast(String(e), true);
@@ -460,35 +474,142 @@ function revertSettings(): void {
 
 /* ================================================================== 配置来源 */
 
+/** 记住最近一次见到的文件原文，用来判断"文件是不是被别人改了" */
+let lastRaw = "";
+
 function applyEnvelope(env: ConfigEnvelope, syncForm: boolean): void {
   cfg = env.config;
   cfgPath = env.path;
-  monitors = env.monitors ?? [];
+  lastRaw = env.raw ?? "";
 
   const warns = env.warnings ?? [];
   setCornerNote(warns.length ? warns.join("\n") : null);
 
   dom.cfgPath.textContent = cfgPath || "（未确定）";
   if (syncForm && isOpen()) fillForm(cfg);
-  if (isOpen()) fillScreens(cfg.screen);
 
   repaint(true);
   void refitAfterLayout();
+}
+
+/* ---------------------------------------------------- 热重载：前端轮询
+   为什么不放 Rust：Rust 侧要引 notify、做 500ms 防抖、还要把回调切回主线程，
+   三样东西合起来几十行，还多一个依赖。前端本来每秒都在跑（心跳 250ms），
+   顺手比对一次文件文本就够了，逻辑全在一处，出问题也好查。
+
+   判定方式：拿 /raw 端点的文件原文跟自己记住的比。
+   自己刚保存过的那份文本已经记进 lastRaw，所以不会自激重渲染。 */
+const POLL_MS = 1000;
+let polling = false;
+
+async function pollConfigOnce(): Promise<void> {
+  if (document.hidden || polling) return;
+  polling = true;
+  try {
+    const res = await invoke<{ raw: string }>("raw_config");
+    if (res.raw === lastRaw) return;              // 没变
+    // 文件变了：交给后端解析（校验/归一化都在那边）
+    const env = await invoke<ConfigEnvelope>("reload_config");
+    // 设置界面开着时不覆盖正在编辑的内容，只在角落里提个醒
+    if (isOpen()) {
+      toast("配置文件已被外部修改，关闭设置后可看到最新内容");
+      lastRaw = env.raw ?? lastRaw;
+      return;
+    }
+    applyEnvelope(env, false);
+  } catch (e) {
+    // 文件被改成看不懂的内容：后端会返回错误并保留上一次有效配置
+    setCornerNote(String(e));
+  } finally {
+    polling = false;
+  }
+}
+
+/**
+ * 应用窗口形态。窗口只有全屏/窗口两种，全屏/半屏由 CSS 负责。
+ *
+ * ★ 关键是必须把窗口【提到前台】。
+ * 实测：只调 setFullscreen(true)，窗口会正确地铺满屏幕，但**不会获得前台焦点** ——
+ * 用户在别的地方（比如浏览器、聊天窗口）时，双击 exe 后屏幕上看不到任何变化，
+ * 以为程序没启动。只 setFocus() 也不够：Windows 不允许后台进程随意抢前台，
+ * 这个调用会被静默忽略。
+ * 可靠做法是 setAlwaysOnTop(true) 再关掉 —— 这个 API 能穿透前台的限制，
+ * 是 Windows 上公认的"把窗口弄到最前"的办法。
+ * 顺便：全屏展示期间保持置顶也是对的，免得被别的窗口盖住大屏时钟。
+ */
+async function applyWindowMode(c: Config): Promise<void> {
+  try {
+    const win = getCurrentWindow();
+    if (c.mode === "fullscreen") {
+      await win.setFullscreen(true);
+      // 穿过后台限制，确保用户看得见
+      await win.setAlwaysOnTop(true);
+      await win.setFocus().catch(() => {});
+    } else {
+      // 窗口配置模式：允许被别的窗口盖住，方便一边改设置一边看效果
+      await win.setAlwaysOnTop(false);
+      await win.setFullscreen(false);
+      await win.setDecorations(true);
+      await win.setResizable(true);
+      await win.center();
+      await win.setFocus().catch(() => {});
+    }
+  } catch (e) {
+    // 用浏览器直接打开前端时会失败，不该影响显示
+    console.warn("设置窗口形态失败（非 Tauri 环境属正常）：", e);
+  }
 }
 
 async function bootstrap(): Promise<void> {
   try {
     const env = await invoke<ConfigEnvelope>("get_config");
     applyEnvelope(env, false);
+    if (env.created) {
+      toast("已在 exe 同目录生成 bigclock.toml，可用记事本直接改");
+    }
   } catch (e) {
     // 后端没起来（比如直接用浏览器打开前端）也要能跑
     console.warn("拿不到配置，改用默认值：", e);
-    setCornerNote(`拿不到配置：${e}`);
     applyEnvelope(
-      { config: defaultConfig(), path: "", explicit_path: false, monitors: [], warnings: [], issues: [] },
+      {
+        config: defaultConfig(),
+        path: "",
+        raw: "",
+        warnings: [],
+        issues: [],
+        created: false,
+      },
       false,
     );
   }
+  // 配置拿到手、界面按配置画好之后，再摆窗口形态，避免"先小窗后全屏"的跳动
+  await applyWindowMode(cfg);
+}
+
+/* ================================================================== 控制条
+   照搬 design-preview.html 的 #devbar：主题 / 显示模式 / 设置。
+   显示模式是三态循环图标（整屏 → 左半屏 → 右半屏），纹理跟着变。
+   注意：JS 直接改 <g id="modefill"> 的 innerHTML，和设计稿里的做法完全一致；
+   所以这里按 SVGGraphicsElement 处理，不能用 HTMLElement。 */
+
+const MODES: Config["half"][] = ["full", "left", "right"];
+
+/** 图标里的填充块：整屏填满 / 左半填左 / 右半填右 */
+function paintModeIcon(half: Config["half"]): void {
+  const g = document.getElementById("modefill");
+  if (!g) return;
+  const rect =
+    half === "full"
+      ? '<rect class="st" x="4.2" y="6.2" width="15.6" height="11.6" rx="1.4"/>'
+      : half === "left"
+        ? '<rect class="st" x="4.2" y="6.2" width="7.2" height="11.6" rx="1.4"/>'
+        : '<rect class="st" x="12.6" y="6.2" width="7.2" height="11.6" rx="1.4"/>';
+  g.innerHTML = rect;
+}
+
+function nextMode(cur: Config["half"]): Config["half"] {
+  const i = MODES.indexOf(cur);
+  return MODES[(i + 1) % MODES.length];
 }
 
 /* ================================================================== 快捷键 */
@@ -509,7 +630,7 @@ async function handleKey(e: KeyboardEvent): Promise<void> {
       closeSettings();
     } else if (cfg.mode === "fullscreen") {
       e.preventDefault();
-      await invoke("set_fullscreen", { on: false });
+      await switchMode("window");
     }
     return;
   }
@@ -518,20 +639,22 @@ async function handleKey(e: KeyboardEvent): Promise<void> {
   switch (e.key) {
     case "F11": {
       e.preventDefault();
-      await invoke("set_fullscreen", { on: cfg.mode !== "fullscreen" });
+      await switchMode(cfg.mode === "fullscreen" ? "window" : "fullscreen");
       break;
     }
+    // 方向键只切"前端显示状态"，窗口始终保持全屏 ——
+    // 整屏/半屏就是 .view 的宽度 + 位移，改窗口大小是多余的一层。
     case "ArrowLeft":
       e.preventDefault();
-      await invoke("apply_display", { mode: "fullscreen", half: "left", screen: cfg.screen });
+      await switchHalf("left");
       break;
     case "ArrowRight":
       e.preventDefault();
-      await invoke("apply_display", { mode: "fullscreen", half: "right", screen: cfg.screen });
+      await switchHalf("right");
       break;
     case "ArrowDown":
       e.preventDefault();
-      await invoke("apply_display", { mode: "fullscreen", half: "full", screen: cfg.screen });
+      await switchHalf("full");
       break;
     case "t":
     case "T": {
@@ -547,28 +670,62 @@ async function handleKey(e: KeyboardEvent): Promise<void> {
   }
 }
 
-/* ================================================================== 光标 */
+/**
+ * 切换整屏 / 左半屏 / 右半屏。
+ * 只改前端的 data-half 并顺手存进配置（下次启动还是这个状态），
+ * 不动窗口本身 —— 窗口一直全屏铺满，半屏就是"内容挪到那一半、另一半留黑"。
+ * 这也是 design-preview.html 里已经验证过的做法。
+ */
+async function switchHalf(half: Config["half"]): Promise<void> {
+  if (cfg.half === half) return;
+  cfg = { ...cfg, half, mode: "fullscreen" };
+  applyTheme(cfg);                 // 这里会把 data-half 写到 <html> 上
+  await refitAfterLayout();        // 容器宽变了，字号必须重算
+  if (isOpen()) fillForm(cfg);
+  await persist();
+}
 
-let lastMove = Date.now();
-function armCursorWatcher(): void {
-  const bump = () => {
-    lastMove = Date.now();
-    document.body.classList.remove("hide-cursor");
-  };
-  addEventListener("mousemove", bump, { passive: true });
-  addEventListener("mousedown", bump, { passive: true });
-  addEventListener("wheel", bump, { passive: true });
-  window.setInterval(() => {
-    // 设置界面开着、或者鼠标刚动过，都不隐藏
-    const shouldHide = !isOpen() && Date.now() - lastMove > 3000;
-    document.body.classList.toggle("hide-cursor", shouldHide);
-  }, 250);
+/** 切换全屏展示 / 窗口配置（走 Tauri 官方 API） */
+async function switchMode(mode: Config["mode"]): Promise<void> {
+  if (cfg.mode === mode) return;
+  cfg = { ...cfg, mode };
+  await applyWindowMode(cfg);
+  if (isOpen()) fillForm(cfg);
+  await persist();
+}
+
+/** 存盘。失败不影响当前显示，用户下次改还会再存一次。 */
+async function persist(): Promise<void> {
+  try {
+    const res = await invoke<ConfigEnvelope>("save_config", { config: cfg });
+    lastRaw = res.raw ?? lastRaw;   // 记下自己写的这份，轮询才不会自激
+  } catch (e) {
+    console.warn("保存配置失败：", e);
+  }
 }
 
 /* ================================================================== 启动 */
 
 function wireSettingsUI(): void {
   dom.btnSettings.addEventListener("click", openSettings);
+
+  // ---- 控制条：主题 ----
+  const btnTheme = $("btn-theme");
+  btnTheme.addEventListener("click", () => {
+    const next: Config["theme"] = cfg.theme === "dark" ? "light" : "dark";
+    cfg = { ...cfg, theme: next };
+    applyTheme(cfg);
+    if (isOpen()) fillForm(cfg);
+    void refitAfterLayout();
+    void persist();
+  });
+
+  // ---- 控制条：显示模式（整屏 → 左半屏 → 右半屏 循环）----
+  const btnMode = $("mode");
+  btnMode.addEventListener("click", () => {
+    void switchHalf(nextMode(cfg.half));
+  });
+
   dom.btnClose.addEventListener("click", () => closeSettings());
   dom.btnRevert.addEventListener("click", revertSettings);
   dom.btnSave.addEventListener("click", () => void saveSettings());
@@ -609,7 +766,7 @@ function wireSettingsUI(): void {
   });
 
   const fields: (keyof typeof dom.f)[] = [
-    "theme", "contrast", "tint", "sem", "mode", "half", "screen",
+    "theme", "contrast", "tint", "mode", "screen",
     "clockFormat", "title", "barEnabled", "barNames", "barGap",
   ];
   for (const k of fields) {
@@ -624,11 +781,12 @@ function wireSettingsUI(): void {
 }
 
 async function main(): Promise<void> {
+  markSelfcheck("js-ok");
   wireSettingsUI();
-  armCursorWatcher();
 
   await bootstrap();
   await refitAfterLayout();
+  markSelfcheck("ready", cfg.mode);
 
   // 整分对齐时钟；心跳只负责秒数与进度填充
   const clock = new MinuteClock({
@@ -641,11 +799,12 @@ async function main(): Promise<void> {
   });
   clock.start();
 
-  // 休眠唤醒 / 切回前台：立刻重算并重新对齐分钟边界
+  // 休眠唤醒 / 切回前台：立刻重算、重新对齐分钟边界，并补一次配置轮询
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
       clock.resync();
       scheduleFit();
+      void pollConfigOnce();
     }
   });
 
@@ -662,21 +821,9 @@ async function main(): Promise<void> {
     });
   }
 
-  // 外部改了配置文件 → 后端热重载后推过来
-  await listen<ConfigEnvelope>("config-changed", (ev) => {
-    const env = ev.payload;
-    // 设置界面开着时不覆盖正在编辑的内容，只在角落里提个醒
-    if (isOpen()) {
-      toast("配置文件已被外部修改，关闭设置后可看到最新内容");
-      cfgPath = env.path;
-      return;
-    }
-    applyEnvelope(env, false);
-  });
-
-  await listen<{ message: string; fatal?: boolean }>("config-error", (ev) => {
-    setCornerNote(`配置文件有误，仍在使用上一次的有效配置：\n${ev.payload.message}`);
-  });
+  // 热重载：每秒看一眼配置文件原文有没有被外部改动。
+  // 比 Rust 侧引 notify + 防抖 + 跨线程回主线程简单得多，逻辑也只有这一处。
+  window.setInterval(() => void pollConfigOnce(), POLL_MS);
 }
 
 void main();
