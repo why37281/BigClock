@@ -36,15 +36,15 @@ export interface Config {
   periods: Period[];
 }
 
-/** 显示器信息（Rust 侧枚举出来给"显示器"下拉用） */
+/** 显示器信息（Rust 侧枚举出来给"显示器"下拉用）。
+ *  字段必须与 Rust 的 win::Monitor 一致 —— 那边多了 x/y 也没关系，
+ *  TS 只取用得到的，但要保证这里不会声明那边没有的字段。 */
 export interface MonitorInfo {
   index: number;
   name: string;
   width: number;
   height: number;
   primary: boolean;
-  x: number;
-  y: number;
 }
 
 /** 配置校验问题（索引 -1 表示与具体时段无关） */

@@ -5,10 +5,12 @@
    禁止：大面积渐变、多色相并存、装饰性彩色、发光、亮色外扩、玻璃拟态、卡片投影。
    ========================================================================== */
 
-/* ===================== 字体 ===================== */
+/* ===================== 字体 =====================
+   放在 src/fonts/ 由 Vite 处理，构建时会被复制到 assets/ 并把这里的
+   url 改写成带哈希的真实路径（内嵌进 exe，离线可用）。 */
 @font-face {
   font-family: "Rajdhani";
-  src: url("../public/fonts/Rajdhani-SemiBold.ttf") format("truetype");
+  src: url("./fonts/Rajdhani-SemiBold.ttf") format("truetype");
   font-weight: 600;
   font-display: block;
 }

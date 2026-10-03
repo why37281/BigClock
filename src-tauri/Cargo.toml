@@ -18,7 +18,18 @@ toml = "0.8"
 notify = "6"
 dirs = "5"
 
-# 发布版要小：去掉符号、开 LTO
+# 只有 Windows 才需要：显示器枚举 / 窗口定位 / 光标。
+# 用官方绑定而不是手写 extern，避免结构体 ABI 对不上导致读到垃圾数据。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+] }
+
+# 发布版要小：去符号、开 LTO、单 codegen 单元
 [profile.release]
 opt-level = "s"
 lto = true

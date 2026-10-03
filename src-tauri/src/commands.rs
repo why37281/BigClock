@@ -69,7 +69,7 @@ pub fn reload_config(app: AppHandle, state: State<'_, AppState>) -> Result<Confi
 }
 
 #[tauri::command]
-pub fn list_monitors() -> Vec<display::Monitor> {
+pub fn list_monitors() -> Vec<crate::win::Monitor> {
     display::list_monitors()
 }
 

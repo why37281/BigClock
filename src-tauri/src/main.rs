@@ -1,14 +1,24 @@
 // BigClock —— 教室晚自习大屏时钟
-// 前端只负责画，配置与窗口形态全部由这边管。
+//
+// 前端只负责画，配置与窗口形态全部由这边管：
+//   config.rs   读 exe 同目录的文本配置 + 宽松解析 + 校验 + 热重载
+//   win.rs      Win32 薄封装（显示器枚举、窗口定位、样式、光标）
+//   display.rs  整屏 / 左半屏 / 右半屏 / 窗口 形态
+//   cursor.rs   鼠标 3 秒不动自动隐藏
+//   commands.rs 前端可调指令
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // 发布版不要多弹一个控制台
 
 mod commands;
 mod config;
 mod cursor;
 mod display;
+mod single_instance;
+mod win;
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use tauri::{Emitter, Manager};
@@ -20,15 +30,17 @@ use cursor::CursorState;
 pub struct AppState {
     pub config: Mutex<Config>,
     pub path: std::path::PathBuf,
+    /// 配置路径是来自环境变量 BIGCLOCK_CONFIG 而不是自动推导
     pub explicit_path: bool,
-    /// 最近一次成功读到的文件内容哈希 —— 用来区分"自己写的"和"用户在外面改的"，
-    /// 不然保存一次就会触发一次自激重载。
+    /// 最近一次成功读到的文件内容哈希 —— 用来区分"自己写的"和"用户在外面改的"。
+    /// 没有它的话，每次保存都会触发一次自激重载。
     pub last_hash: Mutex<u64>,
     pub warnings: Mutex<Vec<String>>,
     pub issues: Mutex<Vec<Issue>>,
-    /// 设置界面开着的时候不要藏光标
+    /// 设置界面开着时不要藏光标
     pub cursor_hide_enabled: Arc<AtomicBool>,
     pub cursor: CursorState,
+    /// 持有 watcher 的生命周期；丢了它热重载就停了
     _watcher: Mutex<Option<Watcher>>,
 }
 
@@ -38,12 +50,13 @@ pub fn hash_of(s: &str) -> u64 {
     h.finish()
 }
 
+/// 每次推给前端的状态包
 #[derive(Clone, serde::Serialize)]
 pub struct ConfigPayload {
     pub config: Config,
     pub path: String,
     pub explicit_path: bool,
-    pub monitors: Vec<display::Monitor>,
+    pub monitors: Vec<win::Monitor>,
     pub warnings: Vec<String>,
     pub issues: Vec<Issue>,
 }
@@ -62,21 +75,19 @@ impl AppState {
 }
 
 fn main() {
-    // ---------- 单实例：抢一个命名互斥体；已经有实例就直接退出 ----------
-    let Some(_guard) = single_instance::acquire() else {
-        if let Ok(exe) = std::env::current_exe() {
-            // 把已有实例的窗口叫到前面来，然后自己退出
-            let _ = exe;
-        }
+    // ---------- 单实例：抢一个命名互斥体，已经有实例就直接退出 ----------
+    // 进程退出时句柄自动释放，不存在"崩溃后残留锁文件"的问题。
+    if single_instance::acquire().is_none() {
+        eprintln!("[bigclock] 已经有一个 BigClock 在运行了，这次启动直接退出。");
         return;
-    };
+    }
 
     // ---------- 配置路径与首次读取 ----------
     let (path, explicit_path) = config::resolve_config_path();
     let (cfg, raw, warnings, issues) = match config::load_or_create(&path) {
         Ok(l) => (l.config, l.raw, l.warnings, l.issues),
         Err(e) => {
-            // 读不出来也绝不白屏：用默认配置跑起来，错误挂到角落里
+            // 读不出来也【绝不白屏】：用默认配置跑起来，把错误挂到角落提示里
             let n = config::normalize(Config::default());
             (n.config, String::new(), vec![format!("{e}（正在使用默认配置）")], n.issues)
         }
@@ -84,10 +95,11 @@ fn main() {
 
     let cursor = CursorState::new();
     let hide_enabled = Arc::new(AtomicBool::new(true));
+
     let initial_mode = cfg.mode.clone();
     let initial_half = cfg.half.clone();
     let initial_screen = cfg.screen;
-    let title = cfg.title.clone();
+    let initial_title = cfg.title.clone();
 
     let state = AppState {
         last_hash: Mutex::new(hash_of(&raw)),
@@ -117,17 +129,19 @@ fn main() {
             commands::reveal_config,
         ])
         .setup(move |app| {
+            // handle 是 AppHandle（内部 Arc），克隆给各处用，别把同一个绑定移来移去
             let handle = app.handle().clone();
 
-            // 启动时按配置摆好窗口形态
-            if let Err(e) = display::apply_mode(&handle, &initial_mode, &initial_half, initial_screen) {
-                eprintln!("[bigclock] 应用窗口形态失败：{e}");
+            // 按配置摆好窗口形态
+            if let Err(e) = display::apply_mode(&handle, &initial_mode, &initial_half, initial_screen)
+            {
+                eprintln!("[bigclock] 设置窗口形态失败：{e}");
             }
-            if let Some(win) = handle.get_webview_window("main") {
-                if !title.is_empty() {
-                    let _ = win.set_title(&format!("BigClock —— {title}"));
+            if let Some(window) = handle.get_webview_window("main") {
+                if !initial_title.is_empty() {
+                    let _ = window.set_title(&format!("BigClock —— {initial_title}"));
                 }
-                let _ = win.show();
+                let _ = window.show();
             }
 
             // 光标自动隐藏
@@ -136,38 +150,14 @@ fn main() {
                 st.cursor.spawn(hide_enabled.clone());
             }
 
-            // 配置文件热重载
+            // ---------- 配置文件热重载 ----------
             let cfg_path = path.clone();
-            let h2 = handle.clone();
+            let watcher_handle = handle.clone();
             let watcher = config::watch(&cfg_path, move || {
-                let app = h2.clone();
-                // 回调在独立线程上，UI 操作必须切回主线程
+                // 回调跑在独立线程上，碰 UI / 发事件必须切回主线程
+                let app = watcher_handle.clone();
                 let _ = app.clone().run_on_main_thread(move || {
-                    let st = app.state::<AppState>();
-                    let Ok(text) = std::fs::read_to_string(&st.path) else { return };
-                    let h = hash_of(&text);
-                    if *st.last_hash.lock().unwrap() == h {
-                        return; // 就是我们自己刚写的那份，忽略
-                    }
-                    match toml::from_str::<Config>(&text) {
-                        Ok(parsed) => {
-                            let n = config::normalize(parsed);
-                            *st.config.lock().unwrap() = n.config.clone();
-                            *st.last_hash.lock().unwrap() = h;
-                            *st.warnings.lock().unwrap() = n.warnings;
-                            *st.issues.lock().unwrap() = n.issues;
-                            let _ = app.emit("config-changed", st.payload());
-                        }
-                        Err(e) => {
-                            // 解析失败：保留上一次有效配置，只报错
-                            let msg = format!("配置文件格式有误，仍在使用上一次的有效配置：{e}");
-                            *st.warnings.lock().unwrap() = vec![msg];
-                            let _ = app.emit(
-                                "config-error",
-                                serde_json::json!({ "message": e.to_string(), "fatal": false }),
-                            );
-                        }
-                    }
+                    reload_from_disk(&app);
                 });
             });
             {
@@ -181,36 +171,36 @@ fn main() {
         .expect("BigClock 启动失败");
 }
 
-// ============================================================================
-// 单实例：命名互斥体
-// 用 CreateMutexW + ERROR_ALREADY_EXISTS 判断，句柄在进程退出时自动释放，
-// 不存在"崩溃后残留锁文件"的问题。
-// ============================================================================
-mod single_instance {
-    use std::ffi::c_void;
+/// 从磁盘重读配置。自己刚写过的那一份会被哈希挡掉，不会自激。
+/// 解析失败时【保留上一次有效配置】，只把错误报出去 —— 绝不让大屏白屏。
+pub fn reload_from_disk(app: &tauri::AppHandle) {
+    let st = app.state::<AppState>();
 
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn CreateMutexW(attr: *mut c_void, initial_owner: i32, name: *const u16) -> *mut c_void;
-        fn GetLastError() -> u32;
-    }
-    const ERROR_ALREADY_EXISTS: u32 = 183;
-
-    pub struct Guard(#[allow(dead_code)] *mut c_void);
-
-    fn wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(std::iter::once(0)).collect()
+    let Ok(text) = std::fs::read_to_string(&st.path) else {
+        return;
+    };
+    let h = hash_of(&text);
+    if *st.last_hash.lock().unwrap() == h {
+        return; // 就是我们自己刚写的，忽略
     }
 
-    pub fn acquire() -> Option<Guard> {
-        let name = wide("Local\\BigClock.SingleInstance.v1");
-        let h = unsafe { CreateMutexW(std::ptr::null_mut(), 0, name.as_ptr()) };
-        if h.is_null() {
-            return Some(Guard(h)); // 建不出来就别拦着用户启动
+    match toml::from_str::<Config>(&text) {
+        Ok(parsed) => {
+            let n = config::normalize(parsed);
+            *st.config.lock().unwrap() = n.config;
+            *st.last_hash.lock().unwrap() = h;
+            *st.warnings.lock().unwrap() = n.warnings;
+            *st.issues.lock().unwrap() = n.issues;
+            let _ = app.emit("config-changed", st.payload());
         }
-        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-            return None;
+        Err(e) => {
+            let msg = format!("配置文件格式有误，仍在使用上一次的有效配置：{e}");
+            eprintln!("[bigclock] {msg}");
+            *st.warnings.lock().unwrap() = vec![msg.clone()];
+            let _ = app.emit(
+                "config-error",
+                serde_json::json!({ "message": msg, "fatal": false }),
+            );
         }
-        Some(Guard(h))
     }
 }
