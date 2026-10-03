@@ -16,3 +16,7 @@ Thumbs.db
 
 # ---- 开发期自动化验收脚本（浏览器 profile 有 5MB 垃圾，不进仓库）----
 .preview/
+
+# ---- 临时文件 ----
+COMMIT_MSG.txt
+*.tmp
