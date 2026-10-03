@@ -223,7 +223,6 @@ fn state_json(app: &AppHandle) -> String {
     serde_json::json!({
         "config_path": st.path.to_string_lossy(),
         "pid": std::process::id(),
-        "created": st.created,
         "fullscreen": fullscreen,
         "page_title": page_title,
         "raw_len": st.raw.lock().unwrap().len(),

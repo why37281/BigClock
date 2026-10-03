@@ -25,8 +25,6 @@ pub struct ConfigPayload {
     pub raw: String,
     pub warnings: Vec<String>,
     pub issues: Vec<Issue>,
-    /// 配置文件是这次启动新建出来的
-    pub created: bool,
 }
 
 /// 前端启动时拉一次
@@ -39,7 +37,6 @@ pub fn get_config(state: State<'_, AppState>) -> ConfigPayload {
         raw: state.raw.lock().unwrap().clone(),
         warnings: state.warnings.lock().unwrap().clone(),
         issues: state.issues.lock().unwrap().clone(),
-        created: state.created,
     }
 }
 
@@ -79,7 +76,6 @@ pub fn save_config(state: State<'_, AppState>, config: Config) -> Result<ConfigP
         raw,
         warnings: n.warnings,
         issues: n.issues,
-        created: false,
     })
 }
 
@@ -109,7 +105,6 @@ pub fn reload_config(state: State<'_, AppState>) -> Result<ConfigPayload, String
                 raw,
                 warnings: n.warnings,
                 issues: n.issues,
-                created: false,
             })
         }
         Err(e) => {

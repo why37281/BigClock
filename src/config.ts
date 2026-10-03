@@ -59,8 +59,6 @@ export interface ConfigEnvelope {
   warnings: string[];
   /** 校验发现的问题；非空时后端拒绝保存 */
   issues: ValidationIssue[];
-  /** 配置文件是这次启动新建出来的 */
-  created: boolean;
 }
 
 /** 默认配置：作息表按用户要求只留一段 18:40–19:00，其余由用户在设置里自己加。 */

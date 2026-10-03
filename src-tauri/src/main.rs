@@ -34,7 +34,6 @@ pub struct AppState {
     pub path: std::path::PathBuf,
     pub warnings: Mutex<Vec<String>>,
     pub issues: Mutex<Vec<Issue>>,
-    pub created: bool,
     /// 自检回传（仅调试用）：webview 把 window.__selfcheck 等内容发回来存这里
     pub selfcheck: Mutex<serde_json::Value>,
 }
@@ -48,8 +47,8 @@ fn main() {
 
     // 配置路径与首次读取
     let (path, _explicit) = config::resolve_config_path();
-    let (cfg, raw, warnings, issues, created) = match config::load_or_create(&path) {
-        Ok(l) => (l.config, l.raw, l.warnings, l.issues, l.created),
+    let (cfg, raw, warnings, issues) = match config::load_or_create(&path) {
+        Ok(l) => (l.config, l.raw, l.warnings, l.issues),
         Err(e) => {
             // 读不出来也【绝不白屏】：用默认配置跑起来，把错误挂到角落提示里
             let n = config::normalize(Config::default());
@@ -58,7 +57,6 @@ fn main() {
                 String::new(),
                 vec![format!("{e}（正在使用默认配置）")],
                 n.issues,
-                false,
             )
         }
     };
@@ -71,7 +69,6 @@ fn main() {
             path,
             warnings: Mutex::new(warnings),
             issues: Mutex::new(issues),
-            created,
             selfcheck: Mutex::new(serde_json::Value::Null),
         })
         .invoke_handler(tauri::generate_handler![

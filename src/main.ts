@@ -564,9 +564,6 @@ async function bootstrap(): Promise<void> {
   try {
     const env = await invoke<ConfigEnvelope>("get_config");
     applyEnvelope(env, false);
-    if (env.created) {
-      toast("已在 exe 同目录生成 bigclock.toml，可用记事本直接改");
-    }
   } catch (e) {
     // 后端没起来（比如直接用浏览器打开前端）也要能跑
     console.warn("拿不到配置，改用默认值：", e);
@@ -577,7 +574,6 @@ async function bootstrap(): Promise<void> {
         raw: "",
         warnings: [],
         issues: [],
-        created: false,
       },
       false,
     );

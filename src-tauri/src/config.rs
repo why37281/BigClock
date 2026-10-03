@@ -355,7 +355,6 @@ pub struct Loaded {
     pub raw: String,
     pub warnings: Vec<String>,
     pub issues: Vec<Issue>,
-    pub created: bool,
 }
 
 /// 读配置。文件不存在就生成一份带注释的默认配置。
@@ -372,14 +371,13 @@ pub fn load_or_create(path: &Path) -> Result<Loaded, String> {
             raw: text,
             warnings: n.warnings,
             issues: n.issues,
-            created: true,
         });
     }
 
     let raw = fs::read_to_string(path).map_err(|e| format!("读配置失败：{e}"))?;
     let parsed: Config = toml::from_str(&raw).map_err(|e| format!("配置格式有误：{e}"))?;
     let n = normalize(parsed);
-    Ok(Loaded { config: n.config, raw, warnings: n.warnings, issues: n.issues, created: false })
+    Ok(Loaded { config: n.config, raw, warnings: n.warnings, issues: n.issues })
 }
 
 /// 写配置。先写临时文件再原子改名，避免"存到一半"被读到。
