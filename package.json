@@ -11,7 +11,7 @@
     "tauri": "tauri",
     "app:dev": "tauri dev",
     "app:build": "tauri build",
-    "portable": "powershell -ExecutionPolicy Bypass -File scripts/build-portable.ps1"
+    "portable": "powershell -ExecutionPolicy Bypass -File scripts/build.ps1 -Portable"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",

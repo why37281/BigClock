@@ -71,13 +71,41 @@ cd src-tauri
 cargo tauri build             # ← 注意是 tauri build，它会自己先跑 npm run build
 ```
 
-产物：
+### 打包便携版（推荐的分发方式）
 
-- `src-tauri\target\release\bigclock.exe` —— 便携版可执行文件
-- `src-tauri\target\release\bundle\nsis\BigClock_0.1.0_x64-setup.exe` —— 安装包
+```powershell
+npm run portable
+# 等价于：powershell -File scripts/build.ps1 -Portable
+# 内部走 `tauri build --no-bundle`，再组装目录 + 打 zip + 生成校验和
+```
+
+产物都在 `release\`（已在 `.gitignore` 里，不进仓库）：
+
+| 产物 | 说明 |
+|---|---|
+| `release\BigClock\BigClock.exe` | 可执行文件 |
+| `release\BigClock\bigclock.toml` | 带注释的配置样例 |
+| `release\BigClock\README.txt` | 给最终用户看的说明 |
+| `release\BigClock_0.1.0_x64_portable.zip` | 整个文件夹压成的包，**分发用这个** |
+| `release\SHA256SUMS.txt` | SHA-256 校验和 |
 
 exe 可以直接拷到别的机器上用（那台机器需要 WebView2 运行时）。
 首次运行会在 exe 同目录生成 `bigclock.toml`。
+
+### 为什么会被 Windows 拦
+
+程序没有数字签名，从浏览器下载后双击会触发 SmartScreen（"Windows 已保护你的电脑"）。
+点 **「更多信息」→「仍要运行」** 即可，之后不再问。
+
+- **用 U 盘拷贝的文件通常没有 Mark-of-the-Web，压根不会弹这个提示** —— 教室多机分发建议用 U 盘。
+- 要彻底消除提示只能买代码签名证书（自签名证书没用：它只在手动导入受信任根的机器上有效，在别人电脑上反而显示"签名无效"）。
+
+拿到证书后接进来（`scripts/build.ps1` 里加一步即可）：
+
+```powershell
+signtool sign /fd sha256 /tr http://timestamp.digicert.com /td sha256 `
+  /f cert.pfx /p <密码> release\BigClock\BigClock.exe
+```
 
 ---
 
@@ -123,6 +151,28 @@ end   = "19:00"
 
 配置文件写坏（乱码 / 删字段 / 值写错）时，程序**保留上一次有效配置**继续显示，
 只在左下角提示错误 —— 绝不让大屏白屏。
+
+---
+
+## 打不开 / 双击后转圈然后没了？
+
+程序**不再静默退出**：启动失败会弹一个系统对话框说明原因，过程写进 exe 同目录的 `startup.log`。
+
+排查顺序：
+
+1. 看 `startup.log` 最后一行，通常就是原因。
+2. 提示「WebView2 的用户数据目录被占用」→ 等十几秒再双击；或任务管理器结束所有
+   `msedgewebview2.exe` 后重试。
+3. 提示 WebView2 相关错误 → 这台机器缺 WebView2 运行时，去微软官网免费装一次。
+4. 想主动复现"启动失败"这条路径：设环境变量
+   `BIGCLOCK_FORCE_WEBVIEW_ERROR=1`（每次都失败）或 `=first`（只失败第一次，验证重试能救回来）。
+
+> **历史坑（别再踩）**：Tauri 在 setup 阶段创建窗口失败时，是**在事件循环回调里
+> `panic!("Failed to setup app: ...")`**，而不是让 `Builder::run()` 返回 `Err`。
+> 所以"在 `run()` 外面 match `Err` 然后重试 3 次"是一段**永远走不到的死代码**。
+> 现在的做法是 `tauri.conf.json` 里给窗口加 `"create": false`，在 Rust 的 setup 里自己调
+> `WebviewWindowBuilder::from_config(..).build()` —— 这条路径**真的会返回 `Err`**，
+> 才能重试、才能在彻底失败时弹框。
 
 ---
 
@@ -173,13 +223,16 @@ BigClock/
 │  ├─ styles.css           全部样式（含配色令牌与控制条）
 │  └─ fonts/               内嵌字体
 ├─ src-tauri/
-│  ├─ src/main.rs          启动、状态管理
+│  ├─ src/main.rs          启动、状态管理、主窗口创建与重试
 │  ├─ src/config.rs        配置读写 + 宽松解析 + 校验
 │  ├─ src/commands.rs      前端可调指令（配置读写 / 打开目录 / 退出）
 │  ├─ src/single_instance.rs  命名互斥体
+│  ├─ src/startup_log.rs   启动日志 + panic 捕获（打包后没有控制台，全靠它留证据）
+│  ├─ src/dialog.rs        原生错误框（WebView2 起不来时唯一还能用的提示手段）
 │  ├─ src/debug_server.rs  仅测试时开启的只读自省端口（见下）
 │  └─ tauri.conf.json
-├─ scripts/build.ps1       构建脚本（内部走 cargo tauri build）
+├─ scripts/build.ps1       构建脚本（tauri build --no-bundle + 便携 zip）
+├─ release/                便携版产物（.gitignore，不进仓库）
 ├─ design-preview.html     最早的设计稿（静态 HTML，保留作参考，不参与打包）
 ├─ BUG-交接文档.md          字号不重算那个 bug 与构建模式坑的完整记录
 ├─ 实施计划.md              整体方案与验收标准

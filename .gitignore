@@ -4,6 +4,9 @@ src-tauri/target/
 src-tauri/gen/
 dist/
 
+# 便携版打包目录与 zip（scripts/build.ps1 -Portable 的产物，不进仓库）
+release/
+
 # 图标源图（各尺寸图标已生成到 src-tauri/icons/，源图不必进仓库）
 icons-source.png
 
@@ -20,6 +23,7 @@ Thumbs.db
 # ---- 临时文件 ----
 COMMIT_MSG.txt
 *.tmp
+build-log.txt
 
 # 程序运行时在 exe 同目录生成的启动日志（排查用，不进仓库）
 bigclock.toml

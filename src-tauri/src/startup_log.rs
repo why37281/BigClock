@@ -54,6 +54,20 @@ pub fn init(exe_dir: Option<PathBuf>) {
         log("!!! 进程即将退出；把 startup.log 发给我即可定位");
         // 仍然跑一遍默认 hook，方便带控制台运行时能看到
         default_hook(info);
+
+        // 打包后既没有控制台也没有窗口，panic 就等于"程序闪一下没了"。
+        // 这里补一个系统对话框，保证任何 panic 都不会是无声的。
+        // 调试构建有控制台，就不弹框了，免得打断 cargo run。
+        if !cfg!(debug_assertions) {
+            let path = LOG_PATH
+                .get()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "startup.log".into());
+            crate::dialog::fatal(
+                "BigClock 崩溃了",
+                &format!("{msg}\n\n出问题的位置：{loc}\n\n详细日志：\n{path}"),
+            );
+        }
     }));
 }
 
