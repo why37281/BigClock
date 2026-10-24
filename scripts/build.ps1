@@ -158,13 +158,30 @@ BigClock · 教室晚自习大屏时钟  v__VERSION__
   没有装到系统里，直接删掉整个文件夹就干净了。
 '@
 $readme = $readme.Replace('__VERSION__', $version)
-Set-Content -Path (Join-Path $out 'README.txt') -Value $readme -Encoding UTF8
+# 显式写成「带 BOM 的 UTF-8」：PowerShell 5.1 的 -Encoding UTF8 带 BOM，
+# 7.x 的不带 —— 同一份脚本换个解释器跑，发给用户的文件就不一样了，
+# 而老记事本还要靠 BOM 才认得中文。
+[System.IO.File]::WriteAllText(
+    (Join-Path $out 'README.txt'),
+    $readme,
+    (New-Object System.Text.UTF8Encoding($true))
+)
 
 # ---------------------------------------------------------------- 压缩
 $zip = Join-Path $root "release\BigClock_${version}_x64_portable.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
-Compress-Archive -Path $out -DestinationPath $zip -CompressionLevel Optimal
-Ok "zip  $( [math]::Round((Get-Item $zip).Length / 1MB, 2) ) MB"
+# 这里刻意不用 Compress-Archive：5.1 和 7.x 的实现不同，同一次构建换个
+# 解释器出来的包能差 80 KB（实测 2.18 MB vs 2.26 MB），说不清是哪个对的。
+# 直接调 .NET 的 ZipFile：两个解释器走同一套 API，只剩压缩等级要挑。
+try { Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop } catch { }
+# SmallestSize 只有 .NET 6+（PowerShell 7）才有；.NET Framework 4.8（5.1）上
+# 直接写它会是 $null，然后 CreateFromDirectory 找不到重载 —— 必须探测。
+$level = [System.IO.Compression.CompressionLevel]::Optimal
+if ([System.Enum]::GetNames([System.IO.Compression.CompressionLevel]) -contains 'SmallestSize') {
+    $level = [System.IO.Compression.CompressionLevel]::SmallestSize
+}
+[System.IO.Compression.ZipFile]::CreateFromDirectory($out, $zip, $level, $true)
+Ok "zip  $( [math]::Round((Get-Item $zip).Length / 1MB, 2) ) MB  ($($level))"
 
 # ---------------------------------------------------------------- 校验和
 $targets = @()
