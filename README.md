@@ -190,6 +190,8 @@ end   = "19:00"
 > `Low Mandatory Level` 就是它。修复（管理员执行一次）：
 > `icacls D:\BigClock /setintegritylevel (OI)(CI)Medium`。
 > 子项标签都是继承来的，修根目录即刻全树生效，无需重编 exe。
+> **不想记命令就用脚本：双击 [`scripts\fix-integrity-label.cmd`](scripts/fix-integrity-label.cmd)**
+> （自动请求管理员权限）——它会先列出当前标签、再修复、最后复检；加 `-CheckOnly` 只查不改。
 > **快速判断技巧：同一个 exe 拷到别的目录能跑、原目录不能跑 → 问题在目录的 NTFS
 > 元数据，不在代码。**
 > **防复发：凡是在 dsh 会话里构建的 exe 都继承 Low 标签，拿去双击必崩。**要么在
