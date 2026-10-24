@@ -52,16 +52,17 @@ export class Renderer {
    * 而且切 hms/hm 时整块时钟会闪一下重排。这里永远建满 6 格，
    * 不显示秒时只是把秒区容器 hidden —— DOM 结构稳定，切换零成本。
    * 附带好处：字号拟合量到的自然宽度恒定，切格式不会引起字号跳动。
+   *
+   * 秒区【不带冒号】：秒数是右下角的小尾巴（下标样式），再带一个冒号
+   * 会读成"单独一行"，观感多余 —— 19:29 后面直接跟小号 53。
    */
   private refreshClockCells(): void {
     if (this.cells.length === 6 && this.clockEl.childElementCount > 0) return;
-    // 秒区前面必须有自己那个冒号格 —— 没有它，hm 下量到的自然宽会短一格，
-    // 切到 hms 时整块时钟会突然变宽、字号跟着跳一下。
     const cell = (c: string) => `<span class="d">${c}</span>`;
     this.clockEl.innerHTML =
       cell("0") + cell("0") + '<span class="c">:</span>' +
       cell("0") + cell("0") +
-      `<span class="sec"><span class="c">:</span>${cell("0")}${cell("0")}</span>`;
+      `<span class="sec">${cell("0")}${cell("0")}</span>`;
     this.cells = Array.from(this.clockEl.querySelectorAll<HTMLElement>(".d"));
     this.secEl = (this.clockEl.querySelector(".sec") as HTMLElement) ?? this.clockEl;
     this.secEl.hidden = !this.showSeconds;
@@ -197,8 +198,19 @@ export class Renderer {
   /**
    * 改变会影响到时钟可用宽的 DOM 之后，等浏览器算完样式再量。
    * 用双 rAF：单 rAF 时样式可能还没提交，量到的还是旧布局。
+   * 250ms 超时兜底：页面被完全遮挡时 Chromium 暂停 rAF（visibilityState
+   * 仍是 visible），不兜底的话 await 它的调用方会一直挂起。
    */
   static settled(): Promise<void> {
-    return new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(() => res())));
+    return new Promise((res) => {
+      let done = false;
+      const fin = (): void => {
+        if (done) return;
+        done = true;
+        res();
+      };
+      requestAnimationFrame(() => requestAnimationFrame(fin));
+      setTimeout(fin, 250);
+    });
   }
 }

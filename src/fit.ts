@@ -35,27 +35,42 @@ export interface FitResult {
   capped: boolean;
 }
 
+export interface ClockFitterOptions {
+  /** 解出的字号写进哪个 CSS 变量。主时钟用 --digit-fill，浮窗时钟用 --float-fill，
+   *  两个实例各写各的，互不覆盖。 */
+  varName?: string;
+  /** 高度方向上限：字号 ≤ min(innerWidth, innerHeight) × capPct%。
+   *  全屏时钟 42（上下还要留日期和进度条），浮窗时钟 66（只有时间）。 */
+  capPct?: number;
+}
+
 export class ClockFitter {
   private stage: HTMLElement;
   private clock: HTMLElement;
-  private header: HTMLElement;
+  private header: HTMLElement | null;
   private lastApplied = -1;
+  private varName: string;
+  capPct: number;
 
-  constructor(stage: HTMLElement, clock: HTMLElement, header: HTMLElement) {
+  constructor(stage: HTMLElement, clock: HTMLElement, header: HTMLElement | null, options: ClockFitterOptions = {}) {
     this.stage = stage;
     this.clock = clock;
     this.header = header;
+    this.varName = options.varName ?? "--digit-fill";
+    this.capPct = options.capPct ?? 42;
   }
 
   /**
-   * 跑一次拟合，并把结果写进 --digit-fill。
+   * 跑一次拟合，并把结果写进自己的字号变量。
    * 结果与上次相同就跳过，避免无意义地触发样式重算。
    */
   fit(): FitResult {
     // ---- 可用宽：读 header 的【渲染后】padding（真实像素，不是 token 流）----
     let padX = 0;
-    const hcs = getComputedStyle(this.header);
-    padX = (parseFloat(hcs.paddingLeft) || 0) + (parseFloat(hcs.paddingRight) || 0);
+    if (this.header) {
+      const hcs = getComputedStyle(this.header);
+      padX = (parseFloat(hcs.paddingLeft) || 0) + (parseFloat(hcs.paddingRight) || 0);
+    }
 
     const avail = this.stage.clientWidth - padX;
     const cur = parseFloat(getComputedStyle(this.clock).fontSize) || 0;
@@ -77,7 +92,7 @@ export class ClockFitter {
 
     // ---- 一次乘法解出目标字号 ----
     const scale = (avail * FILL) / naturalW;
-    const cap = (42 * Math.min(innerWidth, innerHeight)) / 100;  // 高度方向上限
+    const cap = (this.capPct * Math.min(innerWidth, innerHeight)) / 100;  // 高度方向上限
     const raw = cur * scale;
     const target = Math.max(12, Math.min(cap, raw));
     result.target = target;
@@ -85,7 +100,7 @@ export class ClockFitter {
 
     const px = `${target.toFixed(1)}px`;
     if (Math.abs(target - this.lastApplied) > 0.05) {
-      document.documentElement.style.setProperty("--digit-fill", px);
+      document.documentElement.style.setProperty(this.varName, px);
       this.lastApplied = target;
     }
     return result;

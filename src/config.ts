@@ -3,9 +3,12 @@
    前端只做展示与编辑，权威校验在 Rust；这里只做"别把明显错的写出去"的兜底。
    ========================================================================== */
 
-export type Theme = "dark" | "light";
-export type Mode = "fullscreen" | "window";
-export type Half = "full" | "left" | "right";
+export type Theme =
+  | "dark" | "light"          // 基础双主题（灰阶 + 对比度/底色档位）
+  | "indigo" | "ocean" | "forest" | "grape" | "sunset" | "rose"   // 彩色·暗
+  | "paper" | "mint";         // 彩色·亮
+export type Mode = "fullscreen" | "window" | "float";
+export type Half = "full" | "left" | "right" | "custom";
 export type Contrast = "A" | "A2" | "B" | "C";
 export type Tint = "neutral" | "cyan" | "warm";
 export type ClockFormat = "hm" | "hms";
@@ -32,9 +35,31 @@ export interface Config {
   clock_format: ClockFormat;
   title: string;
 
+  /** 自定义边界（half = "custom"）：左右各缩进视口宽的百分比 0..70 */
+  crop_left: number;
+  crop_right: number;
+  /** 浮窗大小（逻辑像素），0 = 未存，用内置默认 */
+  float_w: number;
+  float_h: number;
+  /** 浮窗位置（物理像素），-1 = 未存 */
+  float_x: number;
+  float_y: number;
+
   bar: BarConfig;
   periods: Period[];
 }
+
+/** 彩色主题列表（设置面板下拉用） */
+export const COLORFUL_THEMES: { value: Theme; label: string }[] = [
+  { value: "indigo", label: "靛蓝" },
+  { value: "ocean", label: "深海" },
+  { value: "forest", label: "森林" },
+  { value: "grape", label: "葡萄" },
+  { value: "sunset", label: "落日" },
+  { value: "rose", label: "玫瑰" },
+  { value: "paper", label: "宣纸（亮）" },
+  { value: "mint", label: "薄荷（亮）" },
+];
 
 /** 显示器信息（Rust 侧枚举出来给"显示器"下拉用）。
  *  字段必须与 Rust 的 win::Monitor 一致 —— 那边多了 x/y 也没关系，
@@ -72,6 +97,12 @@ export function defaultConfig(): Config {
     tint: "cyan",
     clock_format: "hm",
     title: "",
+    crop_left: 0,
+    crop_right: 0,
+    float_w: 0,
+    float_h: 0,
+    float_x: -1,
+    float_y: -1,
     bar: { enabled: true, show_names: false, gap_minutes: true },
     periods: [{ name: "晚自习", start: "18:40", end: "19:00" }],
   };

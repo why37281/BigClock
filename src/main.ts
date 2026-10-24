@@ -3,7 +3,7 @@
    ========================================================================== */
 
 import { invoke } from "@tauri-apps/api/core";
-import { availableMonitors, getCurrentWindow } from "@tauri-apps/api/window";
+import { LogicalSize, PhysicalPosition, availableMonitors, getCurrentWindow } from "@tauri-apps/api/window";
 
 import {
   cloneConfig,
@@ -16,6 +16,8 @@ import {
   type ConfigEnvelope,
   type Period,
 } from "./config";
+import { CropController } from "./crop";
+import { FLOAT_DEF_H, FLOAT_DEF_W, FLOAT_MIN_H, FLOAT_MIN_W, FloatWidget } from "./float";
 import { ClockFitter } from "./fit";
 import { Renderer } from "./render";
 import { applyNow, buildSegments, growWeights, nowMinutes, type Segment } from "./segments";
@@ -43,6 +45,7 @@ const dom = {
   btnSettings: $("btn-settings"),
   btnEnterFs: $("btn-enter-fs"),
   btnExitFs: $("btn-exit-fs"),
+  btnFloat: $("btn-float"),
   f: {
     theme: $("f-theme") as HTMLSelectElement,
     contrast: $("f-contrast") as HTMLSelectElement,
@@ -63,12 +66,42 @@ let cfgPath = "";
 /** 语义色（当前段用青还是纯灰）：只由配置文件的 sem 字段控制，界面上不再给开关 */
 const semOn = true;
 
+/** 是否有 Tauri 后端。
+ *  npm run dev 直接用浏览器打开时没有（window.__TAURI_INTERNALS__ 不存在），
+ *  这时所有走 invoke 的操作必然抛 "Cannot read properties of undefined (reading 'invoke')"
+ *  —— 属预期，界面上要给友好提示而不是把 TypeError 甩给用户看。
+ *  打包后的程序跑在 WebView2 里，这里恒为 true。 */
+const HAS_BACKEND = "__TAURI_INTERNALS__" in window;
+
+/** invoke 类操作的报错文案：有后端时透传真实错误，纯浏览器预览时说人话 */
+function backendErr(e: unknown): string {
+  return HAS_BACKEND
+    ? String(e)
+    : "浏览器预览模式没有后端 —— 配置读写要在打包后的程序里才能用，预览中的改动不会保存";
+}
+
+/** 暗基调主题集合：控制 data-lum（时钟暗晕）与设置面板里对比度档位是否可用 */
+const DARK_THEMES = new Set(["dark", "indigo", "ocean", "forest", "grape", "sunset", "rose"]);
+/** tint 只对基础双主题有意义 */
+const TINT_THEMES = new Set(["dark", "light"]);
+
 let segments: Segment[] = [];
 let nowIndex = -1;
 let lastAppliedKey = "";
 
 const renderer = new Renderer();
 const fitter = new ClockFitter(renderer.viewEl, renderer.clockEl, renderer.headerEl);
+const floaty = new FloatWidget(document);
+const crop = new CropController(document, {
+  getLeft: () => cfg.crop_left,
+  getRight: () => cfg.crop_right,
+  onLive: (l, r) => {
+    cfg = { ...cfg, crop_left: l, crop_right: r };
+    applyCropVars(cfg);
+    scheduleFit();
+  },
+  onCommit: () => void persist(),
+});
 
 const BASE_TITLE = "BigClock";
 document.title = BASE_TITLE;
@@ -84,17 +117,32 @@ function markSelfcheck(stage: string, detail = ""): void {
 
 /* ------------------------------------------------------------------ 应用配置 */
 
+/** 自定义边界写到 <html> 的内联变量上（.view 与两条竖线都用它定位） */
+function applyCropVars(c: Config): void {
+  const root = document.documentElement;
+  root.style.setProperty("--crop-l", `${c.crop_left.toFixed(3)}%`);
+  root.style.setProperty("--crop-r", `${c.crop_right.toFixed(3)}%`);
+}
+
 function applyTheme(c: Config): void {
   const root = document.documentElement;
   root.dataset.theme = c.theme;
-  // 亮色主题没有对比度档位（那套灰阶只对暗色有意义）
-  root.dataset.pal = c.theme === "light" ? "A2" : c.contrast;
+  // 基调：彩色暗主题也有时钟暗晕；彩色亮主题没有（和 light 一致）
+  root.dataset.lum = DARK_THEMES.has(c.theme) ? "dark" : "light";
+  // 对比度档位只对暗色基础主题有意义
+  root.dataset.pal = c.theme === "dark" ? c.contrast : "A2";
   root.dataset.tint = c.tint;
   root.dataset.sem = semOn ? "on" : "off";
   root.dataset.half = c.half;
-  // 窗口背景跟着主题走，避免半屏切换时闪一下白
-  const bg = getComputedStyle(root).getPropertyValue("--bg").trim();
-  if (bg) document.body.style.backgroundColor = bg;
+  root.dataset.mode = c.mode;
+  applyCropVars(c);
+  // 窗口背景跟主题走，避免半屏切换时闪一下白；浮窗模式必须透明（圆角外要透出桌面）
+  if (c.mode === "float") {
+    document.body.style.backgroundColor = "transparent";
+  } else {
+    const bg = getComputedStyle(root).getPropertyValue("--bg").trim();
+    if (bg) document.body.style.backgroundColor = bg;
+  }
 }
 
 /**
@@ -110,10 +158,15 @@ function repaint(force = false): void {
   renderer.setTitle(cfg.title);
   // 秒区的显隐会改变时钟总宽 → 必须重量一次字号，否则大小对不上
   const secChanged = renderer.setShowSeconds(cfg.clock_format === "hms");
+  const secChangedF = floaty.setShowSeconds(cfg.clock_format === "hms");
   renderer.setBarVisible(cfg.bar.enabled);
   renderer.setShowNames(cfg.bar.show_names);
   renderer.setDate(now);
   paintClock(now);
+
+  // 控制条按钮与边界线的显隐跟着模式走
+  syncModeButtons(cfg);
+  crop.setActive(cfg.half === "custom" && cfg.mode !== "float");
 
   if (force || key !== lastAppliedKey) {
     lastAppliedKey = key;
@@ -124,12 +177,14 @@ function repaint(force = false): void {
   const weights = growWeights(segments, nowIndex);
   renderer.renderSegments(segments, weights);
 
-  if (secChanged) scheduleFit();
+  if (secChanged || secChangedF) scheduleFit();
 }
 
 /** 高频路径：只动时钟与进度填充，别的都不碰 */
 function paintClock(now: Date): void {
-  renderer.setTime(hhmm(now), cfg.clock_format === "hms" ? ss(now) : "");
+  const sec = cfg.clock_format === "hms" ? ss(now) : "";
+  renderer.setTime(hhmm(now), sec);
+  floaty.setTime(hhmm(now), sec);
 }
 
 function tickFast(): void {
@@ -145,9 +200,26 @@ function tickFast(): void {
 /* ------------------------------------------------------------------ 字号自适应 */
 
 let fitRaf = 0;
+let fitFallback = 0;
 function scheduleFit(): void {
   cancelAnimationFrame(fitRaf);
-  fitRaf = requestAnimationFrame(() => fitter.fit());
+  clearTimeout(fitFallback);
+  const run = (): void => {
+    fitRaf = 0;
+    fitter.fit();
+    // 浮窗时钟各写各的变量；非浮窗模式下 #float 是 display:none，
+    // clientWidth 为 0，fit 会自己提前返回，这里不用判模式
+    floaty.fitter.fit();
+  };
+  fitRaf = requestAnimationFrame(run);
+  // 兜底：页面被完全遮挡时 Chromium 会暂停 rAF（visibilityState 仍是 visible），
+  // 没有这层超时，字号会一直停在旧值。
+  fitFallback = window.setTimeout(() => {
+    if (fitRaf) {
+      cancelAnimationFrame(fitRaf);
+      run();
+    }
+  }, 200);
 }
 
 /** 改完会影响可用宽的界面之后调用：等布局稳定再量 */
@@ -155,6 +227,8 @@ async function refitAfterLayout(): Promise<void> {
   await Renderer.settled();
   fitter.invalidate();
   fitter.fit();
+  floaty.fitter.invalidate();
+  floaty.fitter.fit();
 }
 
 /* ------------------------------------------------------------------ 轻提示 */
@@ -195,7 +269,11 @@ function openSettings(): void {
   document.body.classList.add("settings-open");
   renderPeriodRows();
   markDirty(false);
-  dom.status.textContent = cfgPath ? "" : "未能确定配置文件路径";
+  dom.status.textContent = !HAS_BACKEND
+    ? "浏览器预览模式：配置读写不可用，改动只在本次预览里生效"
+    : cfgPath
+      ? ""
+      : "未能确定配置文件路径";
 }
 
 function closeSettings(force = false): void {
@@ -211,8 +289,9 @@ function closeSettings(force = false): void {
 
 function fillForm(c: Config): void {
   dom.f.theme.value = c.theme;
-  dom.f.contrast.value = c.theme === "light" ? "A2" : c.contrast;
-  dom.f.contrast.disabled = c.theme === "light";
+  dom.f.contrast.value = c.theme === "dark" ? c.contrast : "A2";
+  dom.f.contrast.disabled = c.theme !== "dark";
+  dom.f.tint.disabled = !TINT_THEMES.has(c.theme);
   dom.f.tint.value = c.tint;
   dom.f.mode.value = c.mode;
   dom.f.clockFormat.value = c.clock_format;
@@ -377,6 +456,11 @@ function toTimeInput(v: string): string {
 /** 草稿变了：重算校验 + 立刻预览到界面上 */
 function refreshDraft(): void {
   readForm();
+  // 主题变了，对比度/底色的可用性跟着变（只有暗色基础主题有这两个档位）
+  if (editing) {
+    dom.f.contrast.disabled = editing.theme !== "dark";
+    dom.f.tint.disabled = !TINT_THEMES.has(editing.theme);
+  }
   const issues = validatePeriods(periodsDraft);
   issuesByIndex = new Map(issues.map((x) => [x.index, x.message]));
 
@@ -458,7 +542,7 @@ async function saveSettings(): Promise<void> {
     editing = null;
     await refitAfterLayout();
   } catch (e) {
-    toast(String(e), true);
+    toast(backendErr(e), true);
     dom.btnSave.disabled = false;
   }
 }
@@ -505,6 +589,9 @@ const POLL_MS = 1000;
 let polling = false;
 
 async function pollConfigOnce(): Promise<void> {
+  // 纯浏览器预览（npm run dev 直接打开）没有 Tauri 后端，
+  // 轮询必然每秒失败一次 —— 别把 TypeError 常驻在角落里，静默跳过。
+  if (!HAS_BACKEND) return;
   if (document.hidden || polling) return;
   polling = true;
   try {
@@ -518,7 +605,11 @@ async function pollConfigOnce(): Promise<void> {
       lastRaw = env.raw ?? lastRaw;
       return;
     }
+    const prevMode = cfg.mode;
     applyEnvelope(env, false);
+    // 形态字段被手改了（比如把 mode 改成 float）：窗口本身也要跟着变，
+    // 否则会出现"页面是浮窗、窗口还是全屏"的错位
+    if (env.config.mode !== prevMode) void applyWindowMode(env.config);
   } catch (e) {
     // 文件被改成看不懂的内容：后端会返回错误并保留上一次有效配置
     setCornerNote(String(e));
@@ -528,19 +619,22 @@ async function pollConfigOnce(): Promise<void> {
 }
 
 /**
- * 控制条上「全屏 / 退出全屏」两个按钮的显隐。
- * 两个按钮同一时间只显示一个 —— 用户不用去记"这个图标现在按下去是进还是退"。
+ * 控制条上「全屏 / 退出全屏 / 浮窗」按钮的显隐。
+ * 全屏与退出全屏同一时间只显示一个 —— 用户不用去记"这个图标现在按下去是进还是退"。
+ * 浮窗按钮在已经是浮窗时藏起来（浮窗里有自己的按钮排）。
  */
-function syncFullscreenButtons(mode: Config["mode"]): void {
-  const fs = mode === "fullscreen";
+function syncModeButtons(c: Config): void {
+  const fs = c.mode === "fullscreen";
   dom.btnEnterFs.hidden = fs;
   dom.btnExitFs.hidden = !fs;
+  dom.btnFloat.hidden = c.mode === "float";
 }
 
 /**
- * 应用窗口形态。窗口只有全屏/窗口两种，全屏/半屏由 CSS 负责。
+ * 应用窗口形态：全屏 / 窗口 / 浮窗。
+ * 全屏与半屏（含自定义边界）由 CSS 负责，窗口始终铺满整块显示器。
  *
- * ★ 关键是必须把窗口【提到前台】。
+ * ★ 全屏必须把窗口【提到前台】。
  * 实测：只调 setFullscreen(true)，窗口会正确地铺满屏幕，但**不会获得前台焦点** ——
  * 用户在别的地方（比如浏览器、聊天窗口）时，双击 exe 后屏幕上看不到任何变化，
  * 以为程序没启动。只 setFocus() 也不够：Windows 不允许后台进程随意抢前台，
@@ -548,28 +642,75 @@ function syncFullscreenButtons(mode: Config["mode"]): void {
  * 可靠做法是 setAlwaysOnTop(true) 再关掉 —— 这个 API 能穿透前台的限制，
  * 是 Windows 上公认的"把窗口弄到最前"的办法。
  * 顺便：全屏展示期间保持置顶也是对的，免得被别的窗口盖住大屏时钟。
+ *
+ * ★ 窗口模式显式设大小：不设的话恢复的是 tauri.conf.json 里建窗时的 1280×800
+ * 逻辑像素，在 4K + 高 DPI 缩放下物理尺寸非常大（这就是"窗口怎么这么大"的来源）。
+ * ★ 浮窗模式：无边框 + 置顶 + 透明背景（圆角外透出桌面），大小有下限，
+ * 右下角手柄缩放（JS 接管，窗口本身不再走系统边框缩放）。
  */
 async function applyWindowMode(c: Config): Promise<void> {
-  syncFullscreenButtons(c.mode);
+  syncModeButtons(c);
   try {
     const win = getCurrentWindow();
     if (c.mode === "fullscreen") {
       await win.setFullscreen(true);
+      await win.setBackgroundColor(bgColorOf()).catch(() => {});
       // 穿过后台限制，确保用户看得见
       await win.setAlwaysOnTop(true);
+      await win.setFocus().catch(() => {});
+    } else if (c.mode === "float") {
+      await win.setAlwaysOnTop(true);
+      await win.setDecorations(false);
+      await win.setResizable(false);   // 缩放走右下角手柄（JS 接管）
+      await win.setFullscreen(false);
+      // 先把最小尺寸压下去，再设目标大小，避免被旧的窗口最小值夹住
+      await win.setMinSize(new LogicalSize(FLOAT_MIN_W, FLOAT_MIN_H));
+      const w = c.float_w > 0 ? Math.max(FLOAT_MIN_W, c.float_w) : FLOAT_DEF_W;
+      const h = c.float_h > 0 ? Math.max(FLOAT_MIN_H, c.float_h) : FLOAT_DEF_H;
+      await win.setSize(new LogicalSize(w, h));
+      // 透明背景：圆角矩形外的部分要透出桌面（离开浮窗时再设回主题色）
+      await win.setBackgroundColor("#00000000").catch(() => {});
+      if (c.float_x >= 0 && c.float_y >= 0) {
+        await win.setPosition(new PhysicalPosition(c.float_x, c.float_y));
+      }
       await win.setFocus().catch(() => {});
     } else {
       // 窗口配置模式：允许被别的窗口盖住，方便一边改设置一边看效果
       await win.setAlwaysOnTop(false);
       await win.setFullscreen(false);
+      await win.setBackgroundColor(bgColorOf()).catch(() => {});
       await win.setDecorations(true);
       await win.setResizable(true);
+      await win.setMinSize(new LogicalSize(680, 440));
+      await win.setSize(new LogicalSize(960, 640));
       await win.center();
       await win.setFocus().catch(() => {});
     }
   } catch (e) {
     // 用浏览器直接打开前端时会失败，不该影响显示
     console.warn("设置窗口形态失败（非 Tauri 环境属正常）：", e);
+  }
+}
+
+/** 当前主题的窗口底色（浮窗以外的模式给 webview 设回不透明的主题色） */
+function bgColorOf(): string {
+  return getComputedStyle(document.documentElement).getPropertyValue("--bg").trim() || "#0D1315";
+}
+
+/** 读回浮窗几何（逻辑大小 + 物理位置），存进配置。离开浮窗/拖动缩放后调用。 */
+async function saveFloatGeometry(): Promise<void> {
+  try {
+    const win = getCurrentWindow();
+    const [size, pos, sf] = await Promise.all([win.outerSize(), win.outerPosition(), win.scaleFactor()]);
+    cfg = {
+      ...cfg,
+      float_w: Math.max(FLOAT_MIN_W, size.width / sf),
+      float_h: Math.max(FLOAT_MIN_H, size.height / sf),
+      float_x: pos.x,
+      float_y: pos.y,
+    };
+  } catch {
+    // 浏览器预览里没有窗口 API
   }
 }
 
@@ -591,16 +732,19 @@ async function bootstrap(): Promise<void> {
       false,
     );
   }
-  // ★ 每次启动都进全屏 —— 不看配置文件里记的是什么。
+  // ★ 启动时的形态规则：
+  //   · 记成"窗口配置"（F11 退出去看桌面那种临时动作）→ 一律强制回全屏，不写盘；
+  //   · 记成"浮窗" → 保留。浮窗是正式的展示形态（课间放视频时还要看时间），
+  //     重启后回到浮窗才是用户要的。
   //
   // 原因：F11 退出全屏是"调试时想看眼桌面"的临时动作，不该被记住。之前的表现是
   // 按 F11 退出、关掉程序，下次再开就停在一个 1280×800 的小窗口里，还得手动按一次
   // F11 —— 而课间十分钟，老师根本不知道该按哪个键。
   //
-  // 所以「配置文件里的 mode」只当作"上一次运行时的状态"，启动时一律强制全屏。
-  // 这里只改内存里的 cfg，【不写盘】：文件里的旧值启动时没人看，
-  // 免得每次开机都重写一遍配置文件（重写会把用户手写的注释冲掉）。
-  if (cfg.mode !== "fullscreen") cfg = { ...cfg, mode: "fullscreen" };
+  // 所以「配置文件里的 mode」只当作"上一次运行时的状态"；这里只改内存里的 cfg，
+  // 【不写盘】：文件里的旧值启动时没人看，免得每次开机都重写一遍配置文件
+  // （重写会把用户手写的注释冲掉）。
+  if (cfg.mode === "window") cfg = { ...cfg, mode: "fullscreen" };
 
   // 配置拿到手、界面按配置画好之后，再摆窗口形态，避免"先小窗后全屏"的跳动
   await applyWindowMode(cfg);
@@ -612,19 +756,22 @@ async function bootstrap(): Promise<void> {
    注意：JS 直接改 <g id="modefill"> 的 innerHTML，和设计稿里的做法完全一致；
    所以这里按 SVGGraphicsElement 处理，不能用 HTMLElement。 */
 
-const MODES: Config["half"][] = ["full", "left", "right"];
+const MODES: Config["half"][] = ["full", "left", "right", "custom"];
 
-/** 图标里的填充块：整屏填满 / 左半填左 / 右半填右 */
+/** 图标里的填充块：整屏填满 / 左半填左 / 右半填右 / 自定义填中间一条 */
 function paintModeIcon(half: Config["half"]): void {
-  const g = document.getElementById("modefill");
-  if (!g) return;
   const rect =
     half === "full"
       ? '<rect class="st" x="4.2" y="6.2" width="15.6" height="11.6" rx="1.4"/>'
       : half === "left"
         ? '<rect class="st" x="4.2" y="6.2" width="7.2" height="11.6" rx="1.4"/>'
-        : '<rect class="st" x="12.6" y="6.2" width="7.2" height="11.6" rx="1.4"/>';
-  g.innerHTML = rect;
+        : half === "right"
+          ? '<rect class="st" x="12.6" y="6.2" width="7.2" height="11.6" rx="1.4"/>'
+          : '<rect class="st" x="7.6" y="6.2" width="8.8" height="11.6" rx="1.4"/>';
+  // 控制条和浮窗按钮排里各有一个图标，一起画
+  document.querySelectorAll<SVGElement>(".modefill").forEach((g) => {
+    g.innerHTML = rect;
+  });
 }
 
 function nextMode(cur: Config["half"]): Config["half"] {
@@ -641,6 +788,8 @@ async function handleKey(e: KeyboardEvent): Promise<void> {
 
   if (e.key === "F1") {
     e.preventDefault();
+    // 浮窗里打开设置：先回到窗口模式（设置面板需要一个正常窗口装下）
+    if (!isOpen() && cfg.mode === "float") await switchMode("window");
     isOpen() ? closeSettings() : openSettings();
     return;
   }
@@ -651,6 +800,9 @@ async function handleKey(e: KeyboardEvent): Promise<void> {
     } else if (cfg.mode === "fullscreen") {
       e.preventDefault();
       await switchMode("window");
+    } else if (cfg.mode === "float") {
+      e.preventDefault();
+      await switchMode("fullscreen");
     }
     return;
   }
@@ -659,6 +811,7 @@ async function handleKey(e: KeyboardEvent): Promise<void> {
   switch (e.key) {
     case "F11": {
       e.preventDefault();
+      // F11 永远在全屏 ⇄ 窗口之间切；从浮窗按 F11 视为"退出去调配置"
       await switchMode(cfg.mode === "fullscreen" ? "window" : "fullscreen");
       break;
     }
@@ -677,39 +830,42 @@ async function handleKey(e: KeyboardEvent): Promise<void> {
       await switchHalf("full");
       break;
     case "t":
-    case "T": {
-      const next = cfg.theme === "dark" ? "light" : "dark";
-      cfg = { ...cfg, theme: next };
-      applyTheme(cfg);
-      void refitAfterLayout();
-      void invoke("save_config", { config: { ...cfg, periods: cfg.periods } }).catch(() => {});
+    case "T":
+      toggleTheme();
       break;
-    }
     default:
       break;
   }
 }
 
 /**
- * 切换整屏 / 左半屏 / 右半屏。
+ * 切换整屏 / 左半屏 / 右半屏 / 自定义边界。
  * 只改前端的 data-half 并顺手存进配置（下次启动还是这个状态），
- * 不动窗口本身 —— 窗口一直全屏铺满，半屏就是"内容挪到那一半、另一半留黑"。
- * 这也是 design-preview.html 里已经验证过的做法。
+ * 不动窗口形态 —— 半屏就是"内容挪到那一块、其余留黑"，窗口本身不变。
+ * 自定义边界作为半屏的补充：两条竖线把显示区夹出来，位置存 crop_left/right。
  */
 async function switchHalf(half: Config["half"]): Promise<void> {
   if (cfg.half === half) return;
-  cfg = { ...cfg, half, mode: "fullscreen" };
-  applyTheme(cfg);                 // 这里会把 data-half 写到 <html> 上
+  cfg = { ...cfg, half };
+  applyTheme(cfg);                 // 这里会把 data-half / --crop-* 写到 <html> 上
+  crop.setActive(half === "custom" && cfg.mode !== "float");
+  paintModeIcon(half);
   await refitAfterLayout();        // 容器宽变了，字号必须重算
   if (isOpen()) fillForm(cfg);
   await persist();
 }
 
-/** 切换全屏展示 / 窗口配置（走 Tauri 官方 API） */
+/** 切换全屏展示 / 窗口配置 / 浮窗（走 Tauri 官方 API） */
 async function switchMode(mode: Config["mode"]): Promise<void> {
   if (cfg.mode === mode) return;
+  // 离开浮窗前把几何存下来，下次进浮窗回到原样
+  if (cfg.mode === "float") await saveFloatGeometry();
   cfg = { ...cfg, mode };
+  floaty.setActionsVisible(false);
   await applyWindowMode(cfg);
+  applyTheme(cfg);
+  crop.setActive(cfg.half === "custom" && mode !== "float");
+  await refitAfterLayout();
   if (isOpen()) fillForm(cfg);
   await persist();
 }
@@ -726,21 +882,23 @@ async function persist(): Promise<void> {
 
 /* ================================================================== 启动 */
 
+/** 主题在 暗色 ⇄ 亮色 之间切。控制条 / 浮窗按钮排 / T 键共用这一个入口。 */
+function toggleTheme(): void {
+  const next: Config["theme"] = cfg.theme === "dark" ? "light" : "dark";
+  cfg = { ...cfg, theme: next };
+  applyTheme(cfg);
+  if (isOpen()) fillForm(cfg);
+  void refitAfterLayout();
+  void persist();
+}
+
 function wireSettingsUI(): void {
   dom.btnSettings.addEventListener("click", openSettings);
 
   // ---- 控制条：主题 ----
-  const btnTheme = $("btn-theme");
-  btnTheme.addEventListener("click", () => {
-    const next: Config["theme"] = cfg.theme === "dark" ? "light" : "dark";
-    cfg = { ...cfg, theme: next };
-    applyTheme(cfg);
-    if (isOpen()) fillForm(cfg);
-    void refitAfterLayout();
-    void persist();
-  });
+  $("btn-theme").addEventListener("click", toggleTheme);
 
-  // ---- 控制条：显示模式（整屏 → 左半屏 → 右半屏 循环）----
+  // ---- 控制条：显示模式（整屏 → 左半屏 → 右半屏 → 自定义边界 循环）----
   const btnMode = $("mode");
   btnMode.addEventListener("click", () => {
     void switchHalf(nextMode(cfg.half));
@@ -749,6 +907,31 @@ function wireSettingsUI(): void {
   // ---- 控制条：全屏 / 退出全屏（两个按钮只显示一个，效果同 F11）----
   dom.btnEnterFs.addEventListener("click", () => void switchMode("fullscreen"));
   dom.btnExitFs.addEventListener("click", () => void switchMode("window"));
+
+  // ---- 控制条：浮窗 ----
+  dom.btnFloat.addEventListener("click", () => void switchMode("float"));
+
+  // ---- 浮窗按钮排：与全屏控制条一一对应 ----
+  floaty.setButtonHandler((b) => {
+    switch (b) {
+      case "theme":
+        toggleTheme();
+        break;
+      case "mode":
+        void switchHalf(nextMode(cfg.half));
+        break;
+      case "fullscreen":
+        void switchMode("fullscreen");
+        break;
+      case "settings":
+        void (async () => {
+          await switchMode("window");
+          openSettings();
+        })();
+        break;
+    }
+  });
+  floaty.wire();
 
   dom.btnClose.addEventListener("click", () => closeSettings());
   dom.btnRevert.addEventListener("click", revertSettings);
@@ -769,7 +952,7 @@ function wireSettingsUI(): void {
   });
 
   dom.btnOpenFile.addEventListener("click", () => {
-    void invoke("reveal_config").catch((e) => toast(String(e), true));
+    void invoke("reveal_config").catch((e) => toast(backendErr(e), true));
   });
   dom.btnReload.addEventListener("click", () => {
     void (async () => {
@@ -784,7 +967,7 @@ function wireSettingsUI(): void {
         }
         toast("已重新读取配置文件");
       } catch (e) {
-        toast(String(e), true);
+        toast(backendErr(e), true);
       }
     })();
   });
@@ -809,7 +992,10 @@ async function main(): Promise<void> {
   wireSettingsUI();
 
   await bootstrap();
-  await refitAfterLayout();
+  // 不 await：refitAfterLayout 里等布局要跑 rAF，窗口不可见（被遮挡/后台）时
+  // rAF 会被暂停，await 它会把整个启动链卡死在"半启动"状态 —— 时钟、轮询全不跑。
+  // fit 本来就是尽力测量：可见之后 visibilitychange 里的 scheduleFit 会补上。
+  void refitAfterLayout();
   markSelfcheck("ready", cfg.mode);
 
   // 整分对齐时钟；心跳只负责秒数与进度填充
@@ -837,11 +1023,41 @@ async function main(): Promise<void> {
   // 大屏上不该出现右键菜单
   addEventListener("contextmenu", (e) => e.preventDefault());
 
+  // 自定义边界模式：任意点击都把藏起来的边界线唤回来，并重新计时 3 秒
+  addEventListener("pointerdown", () => {
+    if (cfg.half === "custom" && cfg.mode !== "float") crop.poke();
+  });
+
+  // 浮窗几何持久化：系统拖动/缩放结束后（onMoved/onResized）防抖存一次。
+  // 缩放手柄走 JS setSize，同样会触发 onResized，一条路就够。
+  // 注意 getCurrentWindow() 在纯浏览器里会同步抛（没有 __TAURI_INTERNALS__），
+  // 必须整体包住，否则 main() 后面的轮询/字体重算全被切断。
+  try {
+    let geoTimer = 0;
+    const onGeo = (): void => {
+      if (cfg.mode !== "float") return;
+      clearTimeout(geoTimer);
+      geoTimer = window.setTimeout(() => {
+        void (async () => {
+          await saveFloatGeometry();
+          await persist();
+        })();
+      }, 800);
+    };
+    const win = getCurrentWindow();
+    void win.onMoved(onGeo).catch(() => {});
+    void win.onResized(onGeo).catch(() => {});
+  } catch {
+    // 浏览器预览没有窗口 API，几何持久化直接跳过
+  }
+
   // 字号真正依赖字体度量，字体到了必须重量一次
   if (document.fonts?.ready) {
     document.fonts.ready.then(() => {
       fitter.invalidate();
       fitter.fit();
+      floaty.fitter.invalidate();
+      floaty.fitter.fit();
     });
   }
 

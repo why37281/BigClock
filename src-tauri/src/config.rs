@@ -28,6 +28,20 @@ fn d_clock_format() -> String { "hm".into() }
 fn d_true() -> bool { true }
 fn d_false() -> bool { false }
 
+/// 自定义边界：左右各最多缩进 70%，且两侧合计不得超过 70%（剩余显示区 ≥ 30%）
+const CROP_MAX_SIDE: f64 = 70.0;
+
+/// 浮窗几何的兜底边界（逻辑像素）：小于最小值会被夹上来，防止"拖一下拖没了"
+pub const FLOAT_MIN_W: f64 = 420.0;
+pub const FLOAT_MIN_H: f64 = 180.0;
+
+fn clamp_float_size(v: f64, min: f64, max: f64) -> f64 {
+    if !v.is_finite() || v <= 0.0 {
+        return 0.0; // 0 = 未设置，用内置默认
+    }
+    v.clamp(min, max)
+}
+
 /// 默认作息表：按需求只留一段 18:40–19:00，其余由用户在设置界面自己加
 fn d_periods() -> Vec<Period> {
     vec![Period { name: "晚自习".into(), start: "18:40".into(), end: "19:00".into() }]
@@ -71,6 +85,14 @@ pub struct Config {
     pub tint: String,
     pub clock_format: String,
     pub title: String,
+    /// 自定义边界（half = "custom" 时生效）：左右各缩进视口宽的百分比 0..70
+    pub crop_left: f64,
+    pub crop_right: f64,
+    /// 浮窗几何。w/h 逻辑像素（0 = 未存，用内置默认）；x/y 物理像素（-1 = 未存）
+    pub float_w: f64,
+    pub float_h: f64,
+    pub float_x: i64,
+    pub float_y: i64,
     pub bar: BarConfig,
     pub periods: Vec<Period>,
 }
@@ -86,6 +108,12 @@ impl Default for Config {
             tint: d_tint(),
             clock_format: d_clock_format(),
             title: String::new(),
+            crop_left: 0.0,
+            crop_right: 0.0,
+            float_w: 0.0,
+            float_h: 0.0,
+            float_x: -1,
+            float_y: -1,
             bar: BarConfig::default(),
             periods: d_periods(),
         }
@@ -172,20 +200,60 @@ pub fn normalize(mut cfg: Config) -> Normalized {
             *v = def.to_string();
         }
     }
-    fix(&mut cfg.theme, &["dark", "light"], "dark", "主题 theme", &mut warnings);
-    fix(&mut cfg.mode, &["fullscreen", "window"], "fullscreen", "显示模式 mode", &mut warnings);
-    fix(&mut cfg.half, &["full", "left", "right"], "full", "半屏 half", &mut warnings);
+    // 彩色主题：暗色系 6 个 + 亮色系 2 个。对比度约束比初版放宽
+    // （实测低一些也没问题），只要别低到看不清。
+    fix(
+        &mut cfg.theme,
+        &[
+            "dark", "light", "indigo", "ocean", "forest", "grape", "sunset", "rose", "paper",
+            "mint",
+        ],
+        "dark",
+        "主题 theme",
+        &mut warnings,
+    );
+    fix(&mut cfg.mode, &["fullscreen", "window", "float"], "fullscreen", "显示模式 mode", &mut warnings);
+    fix(&mut cfg.half, &["full", "left", "right", "custom"], "full", "半屏 half", &mut warnings);
     fix(&mut cfg.contrast, &["A", "A2", "B", "C"], "A2", "对比度 contrast", &mut warnings);
     fix(&mut cfg.tint, &["neutral", "cyan", "warm"], "cyan", "底色 tint", &mut warnings);
     fix(&mut cfg.clock_format, &["hm", "hms"], "hm", "时长格式 clock_format", &mut warnings);
 
-    // 亮色主题没有对比度档位（那套灰阶只对暗色有意义）
-    if cfg.theme == "light" && cfg.contrast != "A2" {
+    // 对比度档位/底色偏只对暗色主题有意义
+    if cfg.theme != "dark" && cfg.contrast != "A2" {
         cfg.contrast = "A2".into();
     }
     if cfg.title.chars().count() > 40 {
         cfg.title = cfg.title.chars().take(40).collect();
         warnings.push("标题过长，已截断到 40 字".into());
+    }
+
+    // ---- 自定义边界：两侧缩进各自 0..70%，合计不超过 70%（剩余 ≥ 30%）----
+    let clamp_pct = |v: f64| -> f64 {
+        if !v.is_finite() || v < 0.0 {
+            0.0
+        } else {
+            v.min(CROP_MAX_SIDE)
+        }
+    };
+    cfg.crop_left = clamp_pct(cfg.crop_left);
+    cfg.crop_right = clamp_pct(cfg.crop_right);
+    let crop_sum = cfg.crop_left + cfg.crop_right;
+    if crop_sum > CROP_MAX_SIDE {
+        // 等比收窄两侧，保证剩余显示宽度 ≥ 30%
+        if crop_sum > 0.0 {
+            let scale = CROP_MAX_SIDE / crop_sum;
+            cfg.crop_left *= scale;
+            cfg.crop_right *= scale;
+        }
+        warnings.push("自定义边界太窄，已等比收窄缩进（显示区至少留 30%）".into());
+    }
+
+    // ---- 浮窗几何：w/h 逻辑像素，0 = 未存；x/y 物理像素，负数一律视为未存 ----
+    cfg.float_w = clamp_float_size(cfg.float_w, FLOAT_MIN_W, 3840.0);
+    cfg.float_h = clamp_float_size(cfg.float_h, FLOAT_MIN_H, 2160.0);
+    if cfg.float_x < 0 || cfg.float_y < 0 {
+        cfg.float_x = -1;
+        cfg.float_y = -1;
     }
 
     // ---- 时段 ----
@@ -306,14 +374,22 @@ pub fn default_config_text() -> String {
     s.push_str("# ============================================================\n\n");
 
     s.push_str("# ---------- 显示 ----------\n");
-    s.push_str("# theme   : dark（晚自习）/ light（白天开灯）\n");
-    s.push_str("# mode    : fullscreen（全屏展示）/ window（窗口配置）\n");
-    s.push_str("# half    : full（整屏）/ left（左半屏）/ right（右半屏）—— 黑板挡哪边选哪边\n");
+    s.push_str("# theme   : dark（晚自习）/ light（白天开灯）/ 彩色主题：\n");
+    s.push_str("#           indigo 靛蓝 / ocean 深海 / forest 森林 / grape 葡萄\n");
+    s.push_str("#           sunset 落日 / rose 玫瑰 / paper 宣纸（亮）/ mint 薄荷（亮）\n");
+    s.push_str("# mode    : fullscreen（全屏展示）/ window（窗口配置）/ float（浮窗·置顶小窗）\n");
+    s.push_str("# half    : full（整屏）/ left（左半屏）/ right（右半屏）/ custom（自定义边界）\n");
+    s.push_str("#           —— 黑板挡哪边选哪边；custom 时用 crop_left / crop_right 微调\n");
     s.push_str("#           窗口始终铺满整块屏，半屏只是把内容挪到那一半，另一半留黑\n");
     s.push_str("# screen  : 第几块显示器，0 = 主屏\n");
     s.push_str("# contrast: A | A2 | B | C —— 只对暗色主题有效，越往后越柔\n");
     s.push_str("#           A 最清晰 19.5:1 / A2 推荐 15.7:1 / B 13.9:1 / C 最柔 12.3:1\n");
     s.push_str("# tint    : neutral（中性）/ cyan（偏青，与语义色同族）/ warm（偏暖）\n");
+    s.push_str("#           只对暗色 / 亮色两个基础主题有效\n");
+    s.push_str("# crop_left / crop_right : 自定义边界（half = custom 时生效），\n");
+    s.push_str("#           左右各缩进屏宽的百分比，0 = 不缩；两侧合计 ≤ 70\n");
+    s.push_str("# float_w / float_h : 浮窗大小（逻辑像素），0 = 用默认\n");
+    s.push_str("# float_x / float_y : 浮窗位置（物理像素），-1 = 不指定\n");
     s.push_str("# clock_format: hm（19:29）/ hms（19:29:53）\n");
     s.push_str("# title   : 顶部标题，留空则不显示\n\n");
     s.push_str(&format!("theme        = \"{}\"\n", base.theme));
@@ -322,6 +398,12 @@ pub fn default_config_text() -> String {
     s.push_str(&format!("screen       = {}\n", base.screen));
     s.push_str(&format!("contrast     = \"{}\"\n", base.contrast));
     s.push_str(&format!("tint         = \"{}\"\n", base.tint));
+    s.push_str(&format!("crop_left    = {}\n", base.crop_left));
+    s.push_str(&format!("crop_right   = {}\n", base.crop_right));
+    s.push_str(&format!("float_w      = {}\n", base.float_w));
+    s.push_str(&format!("float_h      = {}\n", base.float_h));
+    s.push_str(&format!("float_x      = {}\n", base.float_x));
+    s.push_str(&format!("float_y      = {}\n", base.float_y));
     s.push_str(&format!("clock_format = \"{}\"\n", base.clock_format));
     s.push_str(&format!("title        = \"{}\"\n\n", base.title));
 
