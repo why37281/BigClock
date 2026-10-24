@@ -65,6 +65,22 @@
        和 design-preview.html 里的做法一致 -->
   <div class="sep"></div>
 
+  <!-- 全屏 / 退出全屏：两个按钮同一时间只显示一个（由 JS 按当前状态切换），
+       效果和 F11 完全一样。分开做成两个按钮，是为了不用记"这个键现在是进还是退"。 -->
+  <button id="btn-enter-fs" title="全屏（F11）" aria-label="全屏">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+         stroke-linecap="round" stroke-linejoin="round">
+      <path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"/>
+    </svg>
+  </button>
+  <button id="btn-exit-fs" title="退出全屏（F11）" aria-label="退出全屏" hidden>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+         stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 9h5V4M20 9h-5V4M4 15h5v5M20 15h-5v5"/>
+    </svg>
+  </button>
+  <div class="sep"></div>
+
   <!-- 设置：作息表编辑器 + 显示/外观 -->
   <button id="btn-settings" title="设置（F1）" aria-label="设置">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
@@ -206,7 +222,9 @@
       <section class="sec">
         <div class="sec-head"><h2>配置文件</h2></div>
         <p class="hint file-hint">
-          作息表保存在下面这个文本文件里，可以直接用记事本编辑，存盘即时生效，不用重启。
+          作息表保存在下面这个文本文件里，可以直接用记事本编辑，存盘即时生效，不用重启。<br />
+          这个文件被设成了「隐藏」（资源管理器里勾上「显示隐藏的文件」才看得到）；
+          点「打开所在文件夹」会直接定位到它。
         </p>
         <div class="file-row">
           <code id="cfg-path">…</code>

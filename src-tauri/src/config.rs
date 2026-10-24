@@ -302,6 +302,7 @@ pub fn default_config_text() -> String {
     s.push_str("# 这个文件就在 BigClock.exe 旁边，可以直接用记事本改，\n");
     s.push_str("# 存盘后 1 秒内界面自动更新，不用重启。\n");
     s.push_str("# 也可以在程序里按 F1 打开设置界面改，改完会写回这个文件。\n");
+    s.push_str("# 这个文件带 Windows「隐藏」属性：资源管理器里勾上「显示隐藏的项目」才看得到。\n");
     s.push_str("# ============================================================\n\n");
 
     s.push_str("# ---------- 显示 ----------\n");
@@ -363,16 +364,12 @@ pub fn load_or_create(path: &Path) -> Result<Loaded, String> {
         if let Some(dir) = path.parent() {
             let _ = fs::create_dir_all(dir);
         }
-        let text = default_config_text();
-        fs::write(path, &text).map_err(|e| format!("写默认配置失败：{e}"))?;
-        let n = normalize(Config::default());
-        return Ok(Loaded {
-            config: n.config,
-            raw: text,
-            warnings: n.warnings,
-            issues: n.issues,
-        });
+        fs::write(path, default_config_text()).map_err(|e| format!("写默认配置失败：{e}"))?;
     }
+
+    // 每次启动都补一次隐藏属性：老版本留下的文件、用户自己取消隐藏的、
+    // 以及恢复备份时带进来的，都会在这里被重新设成隐藏。
+    hide_in_explorer(path);
 
     let raw = fs::read_to_string(path).map_err(|e| format!("读配置失败：{e}"))?;
     let parsed: Config = toml::from_str(&raw).map_err(|e| format!("配置格式有误：{e}"))?;
@@ -396,5 +393,52 @@ pub fn save(path: &Path, cfg: &Config) -> Result<(), String> {
             let _ = fs::remove_file(&tmp);
         }
     }
+    // 改名之后「隐藏」属性不会跟过来（新文件是默认属性），必须重新设一次
+    hide_in_explorer(path);
     Ok(())
+}
+
+// ---------------------------------------------------------------- 隐藏属性
+
+/// 把配置文件设成 Windows 的「隐藏」属性：资源管理器里默认看不见，
+/// 勾上「显示隐藏的文件」才看得到 —— 正是要的那个程度。
+///
+/// 只动属性位：不改内容、不改权限、不碰所有者。
+///
+/// 【每次写盘后都要调】save() 是先写 bigclock.toml.tmp 再改名成正式文件，
+/// 改名之后新文件用的是默认属性，原来的「隐藏」不会跟过来。
+#[cfg(windows)]
+pub fn hide_in_explorer(path: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    const INVALID_FILE_ATTRIBUTES: u32 = u32::MAX;
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // SAFETY: wide 是以 NUL 结尾的合法 UTF-16 串，指针只在调用期间使用。
+    unsafe {
+        let attrs = GetFileAttributesW(wide.as_ptr());
+        if attrs == INVALID_FILE_ATTRIBUTES || attrs & FILE_ATTRIBUTE_HIDDEN != 0 {
+            return; // 读不到（文件还没生成）或本来就是隐藏的，无需处理
+        }
+        let _ = SetFileAttributesW(wide.as_ptr(), attrs | FILE_ATTRIBUTE_HIDDEN);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn hide_in_explorer(_path: &Path) {}
+
+// 只是为了给文件加一个属性位，不值得为它引入 windows-sys
+// （Cargo.toml 里"刻意保持极简"那段写明了为什么删掉它）。
+// 直接声明 kernel32 的这两个函数，零依赖。
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetFileAttributesW(lp_file_name: *const u16) -> u32;
+    fn SetFileAttributesW(lp_file_name: *const u16, dw_file_attributes: u32) -> i32;
 }

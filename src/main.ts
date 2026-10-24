@@ -41,6 +41,8 @@ const dom = {
   btnOpenFile: $("btn-open-file"),
   btnReload: $("btn-reload"),
   btnSettings: $("btn-settings"),
+  btnEnterFs: $("btn-enter-fs"),
+  btnExitFs: $("btn-exit-fs"),
   f: {
     theme: $("f-theme") as HTMLSelectElement,
     contrast: $("f-contrast") as HTMLSelectElement,
@@ -526,6 +528,16 @@ async function pollConfigOnce(): Promise<void> {
 }
 
 /**
+ * 控制条上「全屏 / 退出全屏」两个按钮的显隐。
+ * 两个按钮同一时间只显示一个 —— 用户不用去记"这个图标现在按下去是进还是退"。
+ */
+function syncFullscreenButtons(mode: Config["mode"]): void {
+  const fs = mode === "fullscreen";
+  dom.btnEnterFs.hidden = fs;
+  dom.btnExitFs.hidden = !fs;
+}
+
+/**
  * 应用窗口形态。窗口只有全屏/窗口两种，全屏/半屏由 CSS 负责。
  *
  * ★ 关键是必须把窗口【提到前台】。
@@ -538,6 +550,7 @@ async function pollConfigOnce(): Promise<void> {
  * 顺便：全屏展示期间保持置顶也是对的，免得被别的窗口盖住大屏时钟。
  */
 async function applyWindowMode(c: Config): Promise<void> {
+  syncFullscreenButtons(c.mode);
   try {
     const win = getCurrentWindow();
     if (c.mode === "fullscreen") {
@@ -578,6 +591,17 @@ async function bootstrap(): Promise<void> {
       false,
     );
   }
+  // ★ 每次启动都进全屏 —— 不看配置文件里记的是什么。
+  //
+  // 原因：F11 退出全屏是"调试时想看眼桌面"的临时动作，不该被记住。之前的表现是
+  // 按 F11 退出、关掉程序，下次再开就停在一个 1280×800 的小窗口里，还得手动按一次
+  // F11 —— 而课间十分钟，老师根本不知道该按哪个键。
+  //
+  // 所以「配置文件里的 mode」只当作"上一次运行时的状态"，启动时一律强制全屏。
+  // 这里只改内存里的 cfg，【不写盘】：文件里的旧值启动时没人看，
+  // 免得每次开机都重写一遍配置文件（重写会把用户手写的注释冲掉）。
+  if (cfg.mode !== "fullscreen") cfg = { ...cfg, mode: "fullscreen" };
+
   // 配置拿到手、界面按配置画好之后，再摆窗口形态，避免"先小窗后全屏"的跳动
   await applyWindowMode(cfg);
 }
@@ -721,6 +745,10 @@ function wireSettingsUI(): void {
   btnMode.addEventListener("click", () => {
     void switchHalf(nextMode(cfg.half));
   });
+
+  // ---- 控制条：全屏 / 退出全屏（两个按钮只显示一个，效果同 F11）----
+  dom.btnEnterFs.addEventListener("click", () => void switchMode("fullscreen"));
+  dom.btnExitFs.addEventListener("click", () => void switchMode("window"));
 
   dom.btnClose.addEventListener("click", () => closeSettings());
   dom.btnRevert.addEventListener("click", revertSettings);

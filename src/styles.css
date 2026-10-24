@@ -261,6 +261,9 @@ body.settings-open #devbar { opacity: 0; pointer-events: none; }
   padding: 6px 9px; cursor: pointer; display: flex; align-items: center;
 }
 #devbar button:hover { background: rgba(255,255,255,.16); }
+/* ★ 同 .clock .sec[hidden]：作者样式里的 display:flex 会盖掉 [hidden] 的 UA 规则，
+   不写这句 hidden 完全不起作用（全屏/退出全屏两个按钮就是靠它互斥显示的）。 */
+#devbar button[hidden] { display: none; }
 #devbar svg { width: 19px; height: 19px; stroke: #fff; fill: none; stroke-width: 1.7; stroke-linecap: round; }
 #devbar .sep { width: 1px; align-self: stretch; background: rgba(255,255,255,.2); margin: 2px 4px; }
 

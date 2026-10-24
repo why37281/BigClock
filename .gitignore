@@ -35,6 +35,8 @@ COMMIT_MSG.txt
 *.tmp
 build-log.txt
 
-# 程序运行时在 exe 同目录生成的启动日志（排查用，不进仓库）
+# 程序运行时在 exe 同目录生成的配置文件（不进仓库）
 bigclock.toml
+# 旧版本每启动一次会在旁边写一个 startup.log，现已去掉（改为内存轨迹）；
+# 留着这条只是避免老机器上的残留被误提交
 startup.log

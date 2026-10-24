@@ -4,7 +4,7 @@
 //   config.rs          读写 exe 同目录的文本配置 + 宽松解析 + 校验
 //   single_instance.rs 命名互斥体，防止开两份
 //   commands.rs        配置文件读写 / 打开所在文件夹 / 退出
-//   startup_log.rs     启动日志 + panic 捕获（打包后没有控制台，全靠它留证据）
+//   startup_trace.rs   启动轨迹 + panic 捕获（只在内存里，一个字节都不落盘）
 //   dialog.rs          WebView2 起不来时唯一还能用的原生错误框
 //   debug_server.rs    仅测试时开启的只读自省端口
 //
@@ -19,9 +19,9 @@ mod config;
 mod debug_server;
 mod dialog;
 mod single_instance;
-mod startup_log;
+mod startup_trace;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -47,39 +47,37 @@ pub struct AppState {
 const WINDOW_ATTEMPTS: u32 = 4;
 
 fn main() {
-    // ★ 最早做两件事：定位日志位置、挂 panic hook。
+    // ★ 最早做的事：挂 panic hook。
     // 打包后没有控制台，panic 一旦发生就是"静默死亡"，必须留下痕迹。
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-    startup_log::init(exe_dir.clone());
-    startup_log::log(format!(
+    // 痕迹只在内存里 —— 便携程序不该在 exe 旁边拉文件。
+    startup_trace::init();
+    startup_trace::log(format!(
         "启动 v{}  pid={}  exe_dir={}",
         env!("CARGO_PKG_VERSION"),
         std::process::id(),
-        exe_dir
-            .as_ref()
-            .map(|d| d.display().to_string())
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.display().to_string()))
             .unwrap_or_else(|| "?".into())
     ));
 
     // 单实例：已经有实例在跑就直接退出。
     // 这是唯一一种"静默退出"是正确行为的情况 —— 用户本来就是想开一份。
     if single_instance::acquire().is_none() {
-        startup_log::log("已有实例在运行，本次启动退出");
+        startup_trace::log("已有实例在运行，本次启动退出");
         return;
     }
-    startup_log::log("单实例检查通过");
+    startup_trace::log("单实例检查通过");
 
     // 配置路径与首次读取
     let (path, _explicit) = config::resolve_config_path();
-    startup_log::log(format!("配置路径 {}", path.display()));
+    startup_trace::log(format!("配置路径 {}", path.display()));
     let (cfg, raw, warnings, issues) = match config::load_or_create(&path) {
         Ok(l) => (l.config, l.raw, l.warnings, l.issues),
         Err(e) => {
             // 读不出来也【绝不白屏】：用默认配置跑起来，把错误挂到角落提示里
             let n = config::normalize(Config::default());
-            startup_log::log(format!("读配置失败，改用默认值：{e}"));
+            startup_trace::log(format!("读配置失败，改用默认值：{e}"));
             (
                 n.config,
                 String::new(),
@@ -88,7 +86,7 @@ fn main() {
             )
         }
     };
-    startup_log::log(format!(
+    startup_trace::log(format!(
         "配置就绪 mode={} half={} theme={} 时段数={}",
         cfg.mode,
         cfg.half,
@@ -96,20 +94,19 @@ fn main() {
         cfg.periods.len()
     ));
 
-    if let Err(e) = run(exe_dir.clone(), path, cfg, raw, warnings, issues) {
+    if let Err(e) = run(path, cfg, raw, warnings, issues) {
         // 走到这里说明 Tauri 连事件循环都没建起来（窗口创建失败的路径在 setup 里
         // 已经弹过框并 exit 了，不会走到这里）。
-        startup_log::log(format!("启动失败：{e}"));
-        dialog::fatal("BigClock 启动失败", &fatal_hint(&e, exe_dir.as_deref()));
+        startup_trace::log(format!("启动失败：{e}"));
+        dialog::fatal("BigClock 启动失败", &fatal_hint(&e));
     }
 }
 
 /// 建 Tauri 应用并进入事件循环。正常退出返回 Ok。
 ///
 /// 注意：setup 阶段抛出的 panic 不会变成这里的 Err，而是直接展开到 main。
-/// 那种情况由 startup_log 的 panic hook 弹框兜底。
+/// 那种情况由 startup_trace 的 panic hook 弹框兜底。
 fn run(
-    exe_dir: Option<PathBuf>,
     path: PathBuf,
     cfg: Config,
     raw: String,
@@ -135,20 +132,20 @@ fn run(
             commands::quit_app,
             commands::selfcheck_report,
         ])
-        .setup(move |app| {
-            startup_log::log("setup: 开始");
+        .setup(|app| {
+            startup_trace::log("setup: 开始");
 
             if let Err(e) = create_main_window(app) {
-                startup_log::log(format!("setup: 窗口创建失败：{e}"));
+                startup_trace::log(format!("setup: 窗口创建失败：{e}"));
                 // ★ 绝不让用户面对"转圈然后没了"：说清原因，然后正常退出。
-                dialog::fatal("BigClock 启动失败", &fatal_hint(&e, exe_dir.as_deref()));
+                dialog::fatal("BigClock 启动失败", &fatal_hint(&e));
                 std::process::exit(1);
             }
 
             if debug_server::maybe_start(app.handle().clone()) {
-                startup_log::log("setup: 自省端口已开启");
+                startup_trace::log("setup: 自省端口已开启");
             }
-            startup_log::log("setup: 完成");
+            startup_trace::log("setup: 完成");
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -186,7 +183,7 @@ fn create_main_window<R: tauri::Runtime>(app: &mut tauri::App<R>) -> Result<(), 
     let identifier = app.config().identifier.clone();
     if let Some(base) = std::env::var_os("LOCALAPPDATA") {
         let p = PathBuf::from(base).join(&identifier).join("EBWebView");
-        startup_log::log(format!("默认 WebView2 数据目录 {}", p.display()));
+        startup_trace::log(format!("默认 WebView2 数据目录 {}", p.display()));
     }
 
     let mut last_err = String::new();
@@ -194,7 +191,7 @@ fn create_main_window<R: tauri::Runtime>(app: &mut tauri::App<R>) -> Result<(), 
     for attempt in 1..=WINDOW_ATTEMPTS {
         if let Some(e) = simulated_failure(attempt) {
             last_err = e;
-            startup_log::log(format!(
+            startup_trace::log(format!(
                 "第 {attempt}/{WINDOW_ATTEMPTS} 次创建窗口失败：{last_err}"
             ));
         } else {
@@ -210,13 +207,13 @@ fn create_main_window<R: tauri::Runtime>(app: &mut tauri::App<R>) -> Result<(), 
             if attempt >= 2 {
                 match fallback_data_dir() {
                     Ok(dir) => {
-                        startup_log::log(format!(
+                        startup_trace::log(format!(
                             "第 {attempt} 次改用备用数据目录 {}",
                             dir.display()
                         ));
                         builder = builder.data_directory(dir);
                     }
-                    Err(e) => startup_log::log(format!(
+                    Err(e) => startup_trace::log(format!(
                         "备用数据目录一个都建不出来（继续用默认目录）：{e}"
                     )),
                 }
@@ -224,16 +221,16 @@ fn create_main_window<R: tauri::Runtime>(app: &mut tauri::App<R>) -> Result<(), 
 
             match builder.build() {
                 Ok(window) => {
-                    startup_log::log(format!("第 {attempt} 次创建窗口成功"));
+                    startup_trace::log(format!("第 {attempt} 次创建窗口成功"));
                     match window.show() {
-                        Ok(_) => startup_log::log("窗口已显示"),
-                        Err(e) => startup_log::log(format!("显示窗口失败（通常不影响使用）：{e}")),
+                        Ok(_) => startup_trace::log("窗口已显示"),
+                        Err(e) => startup_trace::log(format!("显示窗口失败（通常不影响使用）：{e}")),
                     }
                     return Ok(());
                 }
                 Err(e) => {
                     last_err = e.to_string();
-                    startup_log::log(format!(
+                    startup_trace::log(format!(
                         "第 {attempt}/{WINDOW_ATTEMPTS} 次创建窗口失败：{last_err}"
                     ));
                 }
@@ -243,7 +240,7 @@ fn create_main_window<R: tauri::Runtime>(app: &mut tauri::App<R>) -> Result<(), 
         if attempt < WINDOW_ATTEMPTS {
             // 退避等一等，给占用方（杀软 / 残留 WebView2 子进程）释放的时间
             let wait = Duration::from_millis(1_200 * attempt as u64);
-            startup_log::log(format!("{} ms 后重试…", wait.as_millis()));
+            startup_trace::log(format!("{} ms 后重试…", wait.as_millis()));
             std::thread::sleep(wait);
         }
     }
@@ -320,12 +317,8 @@ fn simulated_failure(attempt: u32) -> Option<String> {
     ))
 }
 
-/// 把错误翻成人话 + 给出可操作的建议 + 指明日志在哪
-fn fatal_hint(err: &str, exe_dir: Option<&Path>) -> String {
-    let log = exe_dir
-        .map(|d| d.join("startup.log").display().to_string())
-        .unwrap_or_else(|| "startup.log".into());
-
+/// 把错误翻成人话 + 给出可操作的建议 + 把内存里的启动轨迹附在末尾
+fn fatal_hint(err: &str) -> String {
     let lower = err.to_lowercase();
     let reason = if err.contains("0x800700AA")
         || err.contains("在使用中")
@@ -351,6 +344,7 @@ fn fatal_hint(err: &str, exe_dir: Option<&Path>) -> String {
          2) 任务管理器 → 详细信息 → 结束所有 msedgewebview2.exe，再重试\n\
          3) 把整个文件夹换到别的目录（例如 D:\\BigClock\\）再试\n\
          4) 重启电脑\n\n\
-         详细日志（把它发给我就能定位）：\n{log}"
+         启动轨迹（出问题时连这段一起截图就能定位）：\n{}",
+        startup_trace::tail(startup_trace::TAIL_IN_DIALOG)
     )
 }
