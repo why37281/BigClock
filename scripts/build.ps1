@@ -1,9 +1,18 @@
 ﻿# ============================================================
 # BigClock 构建脚本
 #
-#   .\scripts\build.ps1              构建 release exe（前端 + Rust）
-#   .\scripts\build.ps1 -Portable    额外产出便携 zip（推荐的分发方式）
-#   .\scripts\build.ps1 -SkipBuild   不重新编译，只用现有 exe 重新打包
+# 【推荐入口是 scripts\build.cmd，不是这个文件】
+#   build.cmd 会挑解释器：有 PowerShell 7（pwsh）就用 7，没有才退回 5.1。
+#   原因：5.1 读 .ps1 时按 ANSI/GBK 解码，除非文件开头有 UTF-8 BOM ——
+#   谁用编辑器改一次（把 BOM 抹了），构建就整个语法报错。
+#   PS 7 默认按 UTF-8 读，BOM 可有可无，这个坑就不存在了。
+#   所以本文件仍然保留 BOM：那是给 5.1 兜底用的，别删。
+#
+#   .\scripts\build.cmd              构建 release exe（前端 + Rust）
+#   .\scripts\build.cmd -Portable    额外产出便携 zip（推荐的分发方式）
+#   .\scripts\build.cmd -SkipBuild   不重新编译，只用现有 exe 重新打包
+#
+# 直接调本文件也行（两个参数含义相同），但那样就绕过了上面的解释器选择。
 #
 # 产物：
 #   src-tauri\target\release\bigclock.exe

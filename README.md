@@ -75,9 +75,16 @@ cargo tauri build             # ← 注意是 tauri build，它会自己先跑 n
 
 ```powershell
 npm run portable
-# 等价于：powershell -File scripts/build.ps1 -Portable
+# 等价于：scripts\build.cmd -Portable（也可以直接双击 build.cmd）
+# build.cmd 会挑解释器：有 PowerShell 7（pwsh）用 7，没有才退回 5.1
 # 内部走 `tauri build --no-bundle`，再组装目录 + 打 zip + 生成校验和
 ```
+
+> **`build.ps1` 必须保留 UTF-8 BOM。** Windows PowerShell 5.1 读 `.ps1` 时按
+> ANSI/GBK 解码，没有 BOM 就会把中文注释解成乱码、直接语法报错；PowerShell 7
+> 默认按 UTF-8 读，无所谓。`build.cmd` 优先用 `pwsh` 就是为了绕开这条，
+> 但 5.1 兜底路径仍然依赖 BOM，所以别删。用编辑器改完确认一下前三个字节是
+> `EF BB BF`：`Format-Hex scripts\build.ps1 | Select-Object -First 1`。
 
 产物都在 `release\`（已在 `.gitignore` 里，不进仓库）：
 
@@ -279,6 +286,7 @@ BigClock/
 │  ├─ src/dialog.rs        原生错误框（WebView2 起不来时唯一还能用的提示手段）
 │  ├─ src/debug_server.rs  仅测试时开启的只读自省端口（见下）
 │  └─ tauri.conf.json
+├─ scripts/build.cmd       构建入口（挑 pwsh 7 / 退回 5.1，再交给 build.ps1）
 ├─ scripts/build.ps1       构建脚本（tauri build --no-bundle + 便携 zip）
 ├─ release/                便携版产物（.gitignore，不进仓库）
 ├─ design-preview.html     最早的设计稿（静态 HTML，保留作参考，不参与打包）
