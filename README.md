@@ -164,7 +164,10 @@ end   = "19:00"
 2. 提示「WebView2 的用户数据目录被占用」→ 等十几秒再双击；或任务管理器结束所有
    `msedgewebview2.exe` 后重试。
 3. 提示 WebView2 相关错误 → 这台机器缺 WebView2 运行时，去微软官网免费装一次。
-4. 想主动复现"启动失败"这条路径：设环境变量
+4. 日志里反复 `0x800700AA` / `0x8000FFFF`，事件查看器里 `msedgewebview2.exe` 崩在
+   `msedge_elf.dll`（异常代码 `0x80000003`、偏移固定），**且双击 / PowerShell / 脚本
+   拉起全都一样失败** → 查一下 exe 所在目录是不是被打了低完整性标签（见下方机器坑）。
+5. 想主动复现"启动失败"这条路径：设环境变量
    `BIGCLOCK_FORCE_WEBVIEW_ERROR=1`（每次都失败）或 `=first`（只失败第一次，验证重试能救回来）。
 
 > **历史坑（别再踩）**：Tauri 在 setup 阶段创建窗口失败时，是**在事件循环回调里
@@ -173,6 +176,19 @@ end   = "19:00"
 > 现在的做法是 `tauri.conf.json` 里给窗口加 `"create": false`，在 Rust 的 setup 里自己调
 > `WebviewWindowBuilder::from_config(..).build()` —— 这条路径**真的会返回 `Err`**，
 > 才能重试、才能在彻底失败时弹框。
+
+> **机器坑（2026-10 排查实录，耗时两天）**：某"文件夹保护 / 防删除"类工具曾给
+> `D:\BigClock` 打上 **Low 完整性标签（带子项继承）**，并配了一个伪造 SID 的防删除 ACE。
+> 后果：树里编出的 exe 继承 Low 标签 → 进程以 Low 完整性级运行 → Edge 沙箱拒绝这种宿主：
+> `msedgewebview2` 崩在 `msedge_elf.dll` 固定偏移（0x80000003），宿主侧报 0x800700AA /
+> 0x8000FFFF；换哪种启动方式都失败，换 Tauri / WebView2 版本、清 profile、关杀软全都没用
+> （SmartScreen、火绒、mojo 通道在这场排查里全被冤枉过）。
+> 确诊一条命令：`icacls D:\BigClock | findstr /i "Mandatory Deny"`，看到
+> `Low Mandatory Level` 就是它。修复（管理员执行一次）：
+> `icacls D:\BigClock /setintegritylevel (OI)(CI)Medium`。
+> 子项标签都是继承来的，修根目录即刻全树生效，无需重编 exe。
+> **快速判断技巧：同一个 exe 拷到别的目录能跑、原目录不能跑 → 问题在目录的 NTFS
+> 元数据，不在代码。**
 
 ---
 

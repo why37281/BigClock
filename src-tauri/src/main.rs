@@ -181,30 +181,62 @@ fn create_main_window<R: tauri::Runtime>(app: &mut tauri::App<R>) -> Result<(), 
         .cloned()
         .ok_or_else(|| "tauri.conf.json 里找不到 label = \"main\" 的窗口配置".to_string())?;
 
+    // 把 Tauri 默认用的 WebView2 数据目录先记下来 —— 报 0x800700AA 时
+    // 第一个要看的就是它到底在哪、有没有被别人占着。
+    let identifier = app.config().identifier.clone();
+    if let Some(base) = std::env::var_os("LOCALAPPDATA") {
+        let p = PathBuf::from(base).join(&identifier).join("EBWebView");
+        startup_log::log(format!("默认 WebView2 数据目录 {}", p.display()));
+    }
+
     let mut last_err = String::new();
 
     for attempt in 1..=WINDOW_ATTEMPTS {
-        let built = match simulated_failure(attempt) {
-            Some(e) => Err(e),
-            None => tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)
-                .and_then(|builder| builder.build())
-                .map_err(|e| e.to_string()),
-        };
+        if let Some(e) = simulated_failure(attempt) {
+            last_err = e;
+            startup_log::log(format!(
+                "第 {attempt}/{WINDOW_ATTEMPTS} 次创建窗口失败：{last_err}"
+            ));
+        } else {
+            let mut builder = match tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg) {
+                Ok(b) => b,
+                Err(e) => return Err(e.to_string()),
+            };
 
-        match built {
-            Ok(window) => {
-                startup_log::log(format!("第 {attempt} 次创建窗口成功"));
-                match window.show() {
-                    Ok(_) => startup_log::log("窗口已显示"),
-                    Err(e) => startup_log::log(format!("显示窗口失败（通常不影响使用）：{e}")),
+            // 第 1 次用默认目录：它有缓存，启动最快。
+            // 一旦失败就不再干等 —— 经验是占用方（杀软扫描 / 搜索索引器）能持住
+            // 几十秒，而退避只有几秒，等不起。从第 2 次起直接换干净目录：
+            // 宁可丢缓存多花 300ms，也不要起不来。
+            if attempt >= 2 {
+                match fallback_data_dir() {
+                    Ok(dir) => {
+                        startup_log::log(format!(
+                            "第 {attempt} 次改用备用数据目录 {}",
+                            dir.display()
+                        ));
+                        builder = builder.data_directory(dir);
+                    }
+                    Err(e) => startup_log::log(format!(
+                        "备用数据目录一个都建不出来（继续用默认目录）：{e}"
+                    )),
                 }
-                return Ok(());
             }
-            Err(e) => {
-                last_err = e;
-                startup_log::log(format!(
-                    "第 {attempt}/{WINDOW_ATTEMPTS} 次创建窗口失败：{last_err}"
-                ));
+
+            match builder.build() {
+                Ok(window) => {
+                    startup_log::log(format!("第 {attempt} 次创建窗口成功"));
+                    match window.show() {
+                        Ok(_) => startup_log::log("窗口已显示"),
+                        Err(e) => startup_log::log(format!("显示窗口失败（通常不影响使用）：{e}")),
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    last_err = e.to_string();
+                    startup_log::log(format!(
+                        "第 {attempt}/{WINDOW_ATTEMPTS} 次创建窗口失败：{last_err}"
+                    ));
+                }
             }
         }
 
@@ -219,20 +251,68 @@ fn create_main_window<R: tauri::Runtime>(app: &mut tauri::App<R>) -> Result<(), 
     Err(last_err)
 }
 
-/// 测试开关：强制窗口创建失败，用来验证"重试"和"错误提示"这两条平时碰不到的路径。
+/// 备用 WebView2 数据目录。
 ///
-///   BIGCLOCK_FORCE_WEBVIEW_ERROR=first  → 只有第 1 次失败（验证重试能救回来）
-///   BIGCLOCK_FORCE_WEBVIEW_ERROR=1      → 每次都失败（验证弹框 + 日志 + 退出）
+/// 默认目录 `%LOCALAPPDATA%\<identifier>\EBWebView` 被占住时（0x800700AA），
+/// 新建 WebView2 环境会直接失败。占用方通常不是另一个 WebView2 进程，而是
+/// 杀软实时扫描 / Windows 搜索索引器临时持有这个目录里的文件句柄 —— 它们不出现在
+/// `--user-data-dir` 里，等它们扫完就自己好了，但可能持续几十秒。
+///
+/// 所以这里准备几个候选目录，挨个试着建，第一个能用的就用。
+/// 【注意】失败原因必须说出来 —— 上一版这里用 `.ok()?` 把错误吞了，
+/// 结果降级逻辑静默失效，日志只留一句"没拿到备用数据目录"，白查了很久。
+fn fallback_data_dir() -> Result<PathBuf, String> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Some(base) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(PathBuf::from(base).join("BigClock").join("WebView2"));
+    }
+    if let Some(tmp) = std::env::var_os("TEMP") {
+        candidates.push(PathBuf::from(tmp).join("BigClock-WebView2"));
+    }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    {
+        candidates.push(dir.join(".webview2"));
+    }
+
+    if candidates.is_empty() {
+        return Err("LOCALAPPDATA / TEMP 都读不到，也拿不到 exe 目录".to_string());
+    }
+
+    let mut errors: Vec<String> = Vec::new();
+    for dir in candidates {
+        match std::fs::create_dir_all(&dir) {
+            Ok(_) => return Ok(dir),
+            Err(e) => errors.push(format!("{} → {e}", dir.display())),
+        }
+    }
+    Err(errors.join("；"))
+}
+
+/// 测试开关：强制窗口创建失败，用来验证三条平时碰不到的路径。
+///
+///   BIGCLOCK_FORCE_WEBVIEW_ERROR=1      → 前 1 次失败（验证重试能救回来）
+///   BIGCLOCK_FORCE_WEBVIEW_ERROR=2      → 前 2 次失败（第 3 次会切到备用数据目录）
+///   BIGCLOCK_FORCE_WEBVIEW_ERROR=all    → 每次都失败（验证弹框 + 日志 + 退出）
 ///   不设 / 0 / false                    → 正常启动
 ///
 /// 不设这个变量时代码一行都不跑，对普通用户没有任何影响。
 fn simulated_failure(attempt: u32) -> Option<String> {
     let raw = std::env::var("BIGCLOCK_FORCE_WEBVIEW_ERROR").ok()?;
-    let v = raw.trim();
-    if v.is_empty() || v == "0" || v.eq_ignore_ascii_case("false") {
+    let v = raw.trim().to_ascii_lowercase();
+    if v.is_empty() || v == "0" || v == "false" {
         return None;
     }
-    if v.eq_ignore_ascii_case("first") && attempt > 1 {
+    let limit = if v == "first" {
+        1
+    } else if v == "all" {
+        u32::MAX
+    } else {
+        v.parse::<u32>().unwrap_or(u32::MAX)
+    };
+    if attempt > limit {
         return None;
     }
     Some(format!(
@@ -252,6 +332,7 @@ fn fatal_hint(err: &str, exe_dir: Option<&Path>) -> String {
         || lower.contains("in use")
     {
         "WebView2 的用户数据目录被占用了。\n\
+         （程序已经自动换过备用目录试过，还是不行，说明两个目录都被占着。）\n\
          常见原因：杀毒软件正在扫描刚解压出来的程序，\n\
          或者上一次运行残留的 msedgewebview2.exe 还没退干净。"
     } else if err.contains("0x8007") || err.contains("WebView2") {

@@ -7,6 +7,16 @@ dist/
 # 便携版打包目录与 zip（scripts/build.ps1 -Portable 的产物，不进仓库）
 release/
 
+# 最小复现工程（诊断用，和主项目共用技术栈，不是发布产物）
+probe/
+
+# 诊断过程中的取证脚本与补丁记录（临时）
+_probe/
+
+# 2026-10 启动失败排查的取证脚本与 ACL 备份（根因：目录被打了 Low 完整性标签，
+# 详见 README 的"机器坑"。留着备查，不进仓库）
+diag/
+
 # 图标源图（各尺寸图标已生成到 src-tauri/icons/，源图不必进仓库）
 icons-source.png
 
