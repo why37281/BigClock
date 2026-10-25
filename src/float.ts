@@ -18,18 +18,17 @@ import { LogicalSize, PhysicalPosition, getCurrentWindow } from "@tauri-apps/api
 
 import { ClockFitter } from "./fit";
 
-/** 浮窗最小尺寸（逻辑像素）。与 Rust config.rs 的 FLOAT_MIN_W/H 保持一致，
- *  4K 大屏上这个尺寸的时间仍然能从教室后排看清。 */
-export const FLOAT_MIN_W = 420;
-export const FLOAT_MIN_H = 180;
+/** 浮窗最小尺寸（逻辑像素）。与 Rust config.rs 的 FLOAT_MIN_W/H 保持一致。 */
+export const FLOAT_MIN_W = 210;
+export const FLOAT_MIN_H = 90;
 /** 默认浮窗大小（逻辑像素），配置里没存几何时用它 */
 export const FLOAT_DEF_W = 640;
 export const FLOAT_DEF_H = 260;
 /** 拖动判定阈值（CSS 像素）：小于这个位移算点按 */
 const TAP_SLOP = 6;
 
-/** 卡片正下方按钮排的按钮，语义与全屏控制条一一对应 */
-export type FloatButton = "theme" | "mode" | "fullscreen" | "settings";
+/** 卡片正下方按钮排的按钮。不放"显示模式"：浮窗里半屏状态不可见，点了没有反馈 */
+export type FloatButton = "theme" | "fullscreen" | "settings" | "quit";
 
 export class FloatWidget {
   readonly fitter: ClockFitter;
@@ -264,9 +263,9 @@ export class FloatWidget {
       });
     };
     bind("fa-theme", "theme");
-    bind("fa-mode", "mode");
     bind("fa-fs", "fullscreen");
     bind("fa-settings", "settings");
+    bind("fa-quit", "quit");
   }
 
   private onButton: ((b: FloatButton) => void) | null = null;

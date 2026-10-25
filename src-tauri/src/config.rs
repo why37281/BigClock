@@ -32,8 +32,8 @@ fn d_false() -> bool { false }
 const CROP_MAX_SIDE: f64 = 70.0;
 
 /// 浮窗几何的兜底边界（逻辑像素）：小于最小值会被夹上来，防止"拖一下拖没了"
-pub const FLOAT_MIN_W: f64 = 420.0;
-pub const FLOAT_MIN_H: f64 = 180.0;
+pub const FLOAT_MIN_W: f64 = 210.0;
+pub const FLOAT_MIN_H: f64 = 90.0;
 
 fn clamp_float_size(v: f64, min: f64, max: f64) -> f64 {
     if !v.is_finite() || v <= 0.0 {

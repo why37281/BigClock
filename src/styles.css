@@ -21,9 +21,9 @@
      这里的值只是 JS 没跑起来时的兜底（必须选任何比例都不溢出的保守值）。 */
 :root {
   --seg-gap: 0.55vmin;
-  /* 顶条压到 1.8vmin：只是"现在进行到哪"的指示条，段名文字不在这里显示
-     （设置里的段名开关已随之移除） */
-  --bar-h: 1.8vmin;
+  /* 顶条：1.8vmin 再压到 60% = 1.08vmin（4K 上的实际观感只有真机说了算）。
+     段名文字不在这里显示（设置里的段名开关已随之移除）。 */
+  --bar-h: 1.08vmin;
   --pad-y: min(5.5vmin, 4.6vw);
   --pad-x: min(5.5vmin, 4.6vw);
   /* 时钟总宽 ≈ 3.0em（主体 2.63 + 秒区 0.37）。要不超过视口宽的 88%：
@@ -32,7 +32,8 @@
   /* 日期：前两个是原有约束（跟视口走）；7cqw 是"显示区宽的 7%"——
      日期文本约 14em 宽，7cqw 保证整行一定放得进自定义边界收窄后的区域。 */
   --date: min(4.6vmin, 2.6vw, 7cqw);
-  --stroke: 0.22vmin;
+  /* 描边跟着顶条一起收细：条高降到 1.44vmin 后，0.22vmin 的边框占比太重 */
+  --stroke: 0.17vmin;
   --ease: cubic-bezier(.22, .61, .36, 1);
   --dur: 320ms;
   --grow-target: 2.5;   /* 当前段拉到原长的 250% */
@@ -188,20 +189,27 @@ body {
 body.settings-open { cursor: default; }
 
 /* ===================== 半屏：宽度定值 + transform 位移 =====================
-   两个刻意的选择：
+   几个刻意的选择：
      1. 位移用【百分比】而不是 JS 写的像素值 —— translateX(100%) 就是自身宽度
         （半屏时即半个视口），不需要测量，也就不存在"测早了/测晚了"的问题。
      2. 不加 will-change —— 它会把 .view 整块提升为独立合成层并提前栅格化，
         层内文字在尺寸/字号变化时可能沿用旧的栅格结果，看起来就是"重算没生效"。
-   宽度切换【不参与动画】：宽度一变就必须重算 layout()/fitClock()（像素级精确），
-   让它参与动画等于每帧重算，反而会把动画拖死。 */
+   ★ 宽度/left 与 transform 【同步参与动画】（同 dur 同 ease）。
+   之前只有 transform 过渡、宽度瞬间跳变，全屏 ⇄ 半屏会出现"先瞬间变宽/变窄、
+   再从屏幕外飞入"的跳帧。同步过渡后 translateX(100%) 引用的是动画中的当前宽度，
+   右缘会钉在屏幕右缘平滑展开/收拢。字号（--digit-fill/--date）由 JS 在切换后
+   一次写入目标值，靠 .clock/.date 自己的 font-size 过渡补间 —— 量宽对字号
+   严格线性，中途量到的比例和终点一致，不会算错。
+   拖边界线时（html.crop-dragging）禁用全部过渡，保证跟手。 */
 .view {
   position: absolute; top: 0; bottom: 0; left: 0;
   display: flex; flex-direction: column;
-  transition: transform var(--dur) var(--ease);
   /* 容器查询锚点：让 1cqw = 显示区宽的 1%（日期字号在自定义边界收窄时跟着缩）。
      .view 是 absolute 定位，尺寸由 inset 决定，inline-size containment 不影响它自己。 */
   container-type: inline-size;
+  transition: transform var(--dur) var(--ease),
+              width var(--dur) var(--ease),
+              left var(--dur) var(--ease);
 }
 html[data-half="full"]  .view { width: 100%; transform: translateX(0); }
 html[data-half="left"]  .view { width: 50%;  transform: translateX(0); }
@@ -213,6 +221,10 @@ html[data-half="custom"] .view {
   width: calc(100% - var(--crop-l, 0%) - var(--crop-r, 0%));
   transform: translateX(0);
 }
+/* 拖边界线时：宽度和字号都要实时跟手，禁用全部过渡 */
+html.crop-dragging .view,
+html.crop-dragging .clock,
+html.crop-dragging .date { transition: none; }
 
 /* ===================== 顶部：标题 + 分段胶囊条 =====================
    栏高由 --bar-h 控制；描边用真 border（不用 inset box-shadow，它会和填充的
@@ -291,6 +303,9 @@ main {
   flex: 0 0 auto;
   max-width: 100%;
   white-space: nowrap;
+  /* 字号与 .view 的宽度过渡同步补间：半屏切换时 JS 写入的是最终字号，
+     中间的过渡由这条完成，避免宽度在动、字号瞬间跳 */
+  transition: font-size var(--dur) var(--ease);
 }
 /* 暗晕：唯一允许的"阴影"。作用不是装饰，是抹掉纯色笔画在暗底上的硬边，
    降低长时间直视的疲劳。用 vmin 相对单位。
@@ -324,6 +339,7 @@ html[data-lum="dark"] .date { text-shadow: var(--ts, 0 .26vmin 1.1vmin rgba(0,0,
   color: var(--gray-strong);
   white-space: nowrap;
   max-width: 100%;          /* 保底：再窄也不许伸出显示区 */
+  transition: font-size var(--dur) var(--ease);
 }
 
 /* ===================== 控制条 =====================
@@ -572,10 +588,14 @@ html[data-mode="float"] body { background: transparent; }
 html[data-mode="float"] .view,
 html[data-mode="float"] #devbar { display: none; }
 
+/* 浮窗内部的所有间距/控件尺寸都【等比缩放】：浮窗模式下视口就是浮窗自身，
+   vmin/vw 天然跟着浮窗大小走 —— 大窗边距大、小窗边距小，不再是固定像素
+   （固定值会出现"窗大边距太小、窗小边距太大"）。
+   触屏操作目标（按钮/手柄）用 clamp 保底，最小窗里也按得下去。 */
 .fclock-wrap {
   flex: 1 1 auto; min-height: 0;
   display: flex; align-items: center; justify-content: center;
-  padding: 8px 16px 4px;
+  padding: 1.5vmin 3.5vmin 1vmin;
 }
 .fclock {
   font-family: "Rajdhani", system-ui, sans-serif;
@@ -594,13 +614,15 @@ html[data-mode="float"] #devbar { display: none; }
 
 .float-actions {
   flex: 0 0 auto;
-  display: flex; align-items: center; justify-content: center; gap: 10px;
-  padding: 6px 14px 14px;
+  display: flex; align-items: center; justify-content: center;
+  gap: clamp(6px, 1.6vmin, 16px);
+  padding: 1vmin 3.5vmin 2.5vmin;
 }
 .float-actions[hidden] { display: none; }
 .float-actions .fa {
-  width: 44px; height: 44px;
-  border-radius: 14px;
+  width: clamp(36px, 9vmin, 60px);
+  height: clamp(36px, 9vmin, 60px);
+  border-radius: clamp(10px, 2.6vmin, 18px);
   background: color-mix(in srgb, var(--fg) 10%, transparent);
   border: 1px solid color-mix(in srgb, var(--fg) 20%, transparent);
   color: var(--fg);
@@ -610,20 +632,18 @@ html[data-mode="float"] #devbar { display: none; }
 }
 .float-actions .fa:hover { background: color-mix(in srgb, var(--fg) 20%, transparent); }
 .float-actions .fa:active { transform: scale(.94); }
-.float-actions .fa svg { width: 21px; height: 21px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.float-actions #fa-mode svg { width: 25px; height: 25px; }
-.float-actions #fa-mode .st { fill: currentColor; }
+.float-actions .fa svg { width: 55%; height: 55%; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
-/* 右下角缩放手柄：L 形 + 斜纹，摸得出来也看得出来 */
+/* 右下角缩放手柄：L 形 + 斜纹，摸得出来也看得出来（clamp 保底保证触屏按得到） */
 .float-handle {
-  position: absolute; right: 2px; bottom: 2px;
-  width: 26px; height: 26px;
+  position: absolute; right: .6vmin; bottom: .6vmin;
+  width: clamp(18px, 4.5vmin, 34px); height: clamp(18px, 4.5vmin, 34px);
   cursor: nwse-resize; touch-action: none;
   color: var(--fg); opacity: .45;
   display: flex; align-items: flex-end; justify-content: flex-end;
 }
 .float-handle:hover, .float-handle:active { opacity: .95; }
-.float-handle svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; }
+.float-handle svg { width: 68%; height: 68%; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; }
 
 /* ===================== 小屏/窄屏兜底 =====================
    半屏（竖屏视口）宽度可能只有 1920 甚至更窄，设置面板要能正常用。 */
@@ -633,5 +653,5 @@ html[data-mode="float"] #devbar { display: none; }
   .period-row .dur { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .view, .seg, .seg.now .fill { transition: none; }
+  .view, .clock, .date, .seg, .seg.now .fill { transition: none; }
 }

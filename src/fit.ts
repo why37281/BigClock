@@ -13,10 +13,11 @@
 
    2) 不要用 em 常量硬算宽度。靠"数格子"推字距个数一定会错（差一格就贴边）。
 
-   3) 量自然宽度前必须解除约束：
+   3) 量自然宽度前必须解除 max-width 约束：
       · .clock 的 max-width:100% 会把 rect 夹到容器宽 —— 半屏下正好夹成容器宽，
         读数看起来"没溢出"，其实早被裁了；
-      · 定位祖先 .view 的 transform 会让 rect 落在位移后的坐标系里。
+      · 祖先 .view 的 transform 是纯平移，不影响 rect 的【宽度】，不用碰 ——
+        碰了反而会打断切换动画里正在过渡的 transform（见 fit() 内注释）。
 
    关键性质：时钟宽度对 font-size 是【严格线性】的（格宽 .546em / .212em、
    字距 .018em、秒区 .212em 全是 em 单位），所以
@@ -78,14 +79,15 @@ export class ClockFitter {
     if (!(avail > 0)) return result;   // 窄到没有空间就不动字号，保持可读
     if (!(cur > 0)) return result;
 
-    // ---- 量自然宽度：先拆掉 max-width 与祖先 transform ----
+    // ---- 量自然宽度：只拆 max-width ----
+    // ★ 不再拆祖先 transform：translateX 是纯平移，不改变 rect 的【宽度】，
+    //   量宽根本不受影响；而在半屏切换动画进行中把 transform 内联成 none 再复原
+    //   会打断/重启正在过渡的 transform（"none" 和 "translateX(0)" 是不同的值），
+    //   导致 width 与 transform 两条过渡不同步，右缘出现超调跳动。
     const prevMaxW = this.clock.style.maxWidth;
-    const prevTf = this.stage.style.transform;
     this.clock.style.maxWidth = "none";
-    this.stage.style.transform = "none";
     const naturalW = this.clock.getBoundingClientRect().width;
     this.clock.style.maxWidth = prevMaxW;
-    this.stage.style.transform = prevTf;
 
     result.naturalW = naturalW;
     if (!(naturalW > 0)) return result;

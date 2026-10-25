@@ -46,6 +46,7 @@ const dom = {
   btnEnterFs: $("btn-enter-fs"),
   btnExitFs: $("btn-exit-fs"),
   btnFloat: $("btn-float"),
+  btnQuit: $("btn-quit"),
   f: {
     theme: $("f-theme") as HTMLSelectElement,
     contrast: $("f-contrast") as HTMLSelectElement,
@@ -96,11 +97,16 @@ const crop = new CropController(document, {
   getLeft: () => cfg.crop_left,
   getRight: () => cfg.crop_right,
   onLive: (l, r) => {
+    // 拖线期间禁用 .view 的宽度过渡（html.crop-dragging），保证跟手
+    document.documentElement.classList.add("crop-dragging");
     cfg = { ...cfg, crop_left: l, crop_right: r };
     applyCropVars(cfg);
     scheduleFit();
   },
-  onCommit: () => void persist(),
+  onCommit: () => {
+    document.documentElement.classList.remove("crop-dragging");
+    void persist();
+  },
 });
 
 const BASE_TITLE = "BigClock";
@@ -229,6 +235,33 @@ async function refitAfterLayout(): Promise<void> {
   fitter.fit();
   floaty.fitter.invalidate();
   floaty.fitter.fit();
+}
+
+/**
+ * 半屏/自定义边界切换的宽度过渡期间持续拟合字号。
+ *
+ * 只在切换后第 ~32ms 量一次是不够的：那时 .view 的 width 还在过渡中间，
+ * 量到的可用宽偏大，算出的字号跟着偏大；宽度过渡结束后字号不再重算，
+ * 时钟就会伸出显示区（直到下一分钟的整分重算才自己恢复）。
+ * 这里让 fit 跟着过渡逐帧跑 —— 量宽对字号严格线性，任何中间时刻算出的
+ * 目标值都精确对应当前宽度，字号与宽度同帧收敛，结束时正好到位。
+ */
+function trackFit(): void {
+  const DUR = 420;   // --dur(320ms) + 余量
+  const t0 = performance.now();
+  const step = (): void => {
+    fitter.fit();
+    floaty.fitter.fit();
+    if (performance.now() - t0 < DUR) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+  // 页面被遮挡时 rAF 会停（CSS 过渡本身也停，两边冻结在一起，不冲突）；
+  // 这条超时兜底保证任何情况下终态至少被量一次，恢复可见后还有
+  // visibilitychange 里的 scheduleFit 再补一道。
+  window.setTimeout(() => {
+    fitter.fit();
+    floaty.fitter.fit();
+  }, 460);
 }
 
 /* ------------------------------------------------------------------ 轻提示 */
@@ -850,7 +883,8 @@ async function switchHalf(half: Config["half"]): Promise<void> {
   applyTheme(cfg);                 // 这里会把 data-half / --crop-* 写到 <html> 上
   crop.setActive(half === "custom" && cfg.mode !== "float");
   paintModeIcon(half);
-  await refitAfterLayout();        // 容器宽变了，字号必须重算
+  // 宽度过渡期间逐帧拟合字号（一次性 fit 会量到中间宽度，见 trackFit 注释）
+  trackFit();
   if (isOpen()) fillForm(cfg);
   await persist();
 }
@@ -892,6 +926,15 @@ function toggleTheme(): void {
   void persist();
 }
 
+/**
+ * 退出程序。全屏/浮窗没有标题栏，控制条和浮窗按钮排是仅有的可见出口。
+ * 不弹确认 —— 大屏上多弹一个框反而挡界面，误触了重新双击就是。
+ */
+function quitApp(): void {
+  // 浏览器预览里没有后端，退不了（也无所谓）
+  void invoke("quit_app").catch((e) => toast(backendErr(e), true));
+}
+
 function wireSettingsUI(): void {
   dom.btnSettings.addEventListener("click", openSettings);
 
@@ -911,14 +954,11 @@ function wireSettingsUI(): void {
   // ---- 控制条：浮窗 ----
   dom.btnFloat.addEventListener("click", () => void switchMode("float"));
 
-  // ---- 浮窗按钮排：与全屏控制条一一对应 ----
+  // ---- 浮窗按钮排：主题 / 回全屏 / 设置 / 退出（不放显示模式，浮窗里不可见） ----
   floaty.setButtonHandler((b) => {
     switch (b) {
       case "theme":
         toggleTheme();
-        break;
-      case "mode":
-        void switchHalf(nextMode(cfg.half));
         break;
       case "fullscreen":
         void switchMode("fullscreen");
@@ -929,9 +969,15 @@ function wireSettingsUI(): void {
           openSettings();
         })();
         break;
+      case "quit":
+        quitApp();
+        break;
     }
   });
   floaty.wire();
+
+  // ---- 控制条：退出程序 ----
+  dom.btnQuit.addEventListener("click", quitApp);
 
   dom.btnClose.addEventListener("click", () => closeSettings());
   dom.btnRevert.addEventListener("click", revertSettings);
