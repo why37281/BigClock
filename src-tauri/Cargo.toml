@@ -1,6 +1,6 @@
 [package]
 name = "bigclock"
-version = "0.2.0"
+version = "0.2.1"
 description = "教室晚自习大屏时钟"
 authors = ["why37281"]
 edition = "2021"

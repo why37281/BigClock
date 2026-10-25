@@ -27,6 +27,10 @@ export interface BarConfig {
 
 export interface Config {
   theme: Theme;
+  /** 亮暗切换的两个"槽"：最近使用的暗色 / 亮色主题。切换按钮在两槽之间翻，
+   *  不会把彩色主题顶掉；applyTheme 在每次主题变化时更新对应槽。 */
+  theme_dark: Theme;
+  theme_light: Theme;
   mode: Mode;
   half: Half;
   screen: number;
@@ -90,6 +94,8 @@ export interface ConfigEnvelope {
 export function defaultConfig(): Config {
   return {
     theme: "dark",
+    theme_dark: "dark",
+    theme_light: "light",
     mode: "fullscreen",
     half: "full",
     screen: 0,

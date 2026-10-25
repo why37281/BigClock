@@ -130,6 +130,8 @@ signtool sign /fd sha256 /tr http://timestamp.digicert.com /td sha256 `
 
 ```toml
 theme        = "dark"        # dark / light / indigo / ocean / forest / grape / sunset / rose / paper / mint
+theme_dark   = "dark"        # 亮暗切换槽：最近用的暗色主题（自动维护）
+theme_light  = "light"       # 亮暗切换槽：最近用的亮色主题（自动维护）
 mode         = "fullscreen"  # 上一次运行时的形态；启动时 window 强制回全屏，float 保留
 half         = "full"        # full（整屏）/ left / right / custom（自定义边界）
 screen       = 0             # 第几块显示器，0 = 主屏
@@ -273,7 +275,7 @@ end   = "19:00"
 | `←` / `→` | 左半屏 / 右半屏 |
 | `↓` | 整屏 |
 | `Esc` | 退出全屏（设置开着时是关闭设置；浮窗时是回全屏） |
-| `T` | 暗色 ⇄ 亮色 |
+| `T` | 亮暗切换（在最近用的亮色、暗色主题之间翻，不丢彩色主题） |
 
 左下角的控制条平时是隐形的，鼠标移上去才浮现，里面是 **主题 / 显示模式 / 全屏·退出全屏·浮窗 / 设置**。
 显示模式是一个图标四态循环：整屏 → 左半屏 → 右半屏 → 自定义边界，图案跟着变。

@@ -15,6 +15,8 @@
 # theme   : dark（晚自习）/ light（白天开灯）/ 彩色主题：
 #           indigo 靛蓝 / ocean 深海 / forest 森林 / grape 葡萄
 #           sunset 落日 / rose 玫瑰 / paper 宣纸（亮）/ mint 薄荷（亮）
+# theme_dark / theme_light : 亮暗切换的两个"槽"（最近用的暗色/亮色主题），
+#           切换按钮在这两个之间翻，不会把彩色主题顶掉；程序自动维护，一般不用手改
 # mode    : fullscreen（全屏）/ window（窗口）/ float（浮窗·置顶小窗）
 #           —— 只记"上一次的形态"：启动时 window 会强制回全屏，float 会保留
 # half    : full（整屏）/ left（左半屏）/ right（右半屏）/ custom（自定义边界）
@@ -31,6 +33,8 @@
 # clock_format: hm（19:29）/ hms（19:29:53）
 # title   : 顶部标题，留空则不显示
 theme        = "dark"
+theme_dark   = "dark"
+theme_light  = "light"
 mode         = "fullscreen"
 half         = "full"
 screen       = 0

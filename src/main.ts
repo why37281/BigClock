@@ -15,6 +15,7 @@ import {
   type Config,
   type ConfigEnvelope,
   type Period,
+  type Theme,
 } from "./config";
 import { CropController } from "./crop";
 import { FLOAT_DEF_H, FLOAT_DEF_W, FLOAT_MIN_H, FLOAT_MIN_W, FloatWidget } from "./float";
@@ -132,6 +133,11 @@ function applyCropVars(c: Config): void {
 
 function applyTheme(c: Config): void {
   const root = document.documentElement;
+  // 亮暗切换的"槽位"记忆：当前主题属于哪个基调，就更新哪个槽。
+  // 所有主题变化（设置面板、热重载、亮暗切换本身）都经过这里，
+  // 槽位永远跟着最近一次的选择走；已是同值时是空操作。
+  if (DARK_THEMES.has(c.theme)) c.theme_dark = c.theme;
+  else c.theme_light = c.theme;
   root.dataset.theme = c.theme;
   // 基调：彩色暗主题也有时钟暗晕；彩色亮主题没有（和 light 一致）
   root.dataset.lum = DARK_THEMES.has(c.theme) ? "dark" : "light";
@@ -916,9 +922,14 @@ async function persist(): Promise<void> {
 
 /* ================================================================== 启动 */
 
-/** 主题在 暗色 ⇄ 亮色 之间切。控制条 / 浮窗按钮排 / T 键共用这一个入口。 */
+/**
+ * 亮暗切换：在"最近用的暗色主题"和"最近用的亮色主题"两个槽之间翻。
+ * 之前是硬切 dark⇄light，会把用户选好的彩色主题顶掉；改成槽位记忆后，
+ * 葡萄紫 ↔ 薄荷 这样来回翻也不会丢主题（槽位由 applyTheme 维护并持久化）。
+ * 控制条 / 浮窗按钮排 / T 键共用这一个入口。
+ */
 function toggleTheme(): void {
-  const next: Config["theme"] = cfg.theme === "dark" ? "light" : "dark";
+  const next: Theme = DARK_THEMES.has(cfg.theme) ? cfg.theme_light : cfg.theme_dark;
   cfg = { ...cfg, theme: next };
   applyTheme(cfg);
   if (isOpen()) fillForm(cfg);

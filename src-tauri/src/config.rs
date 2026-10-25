@@ -28,6 +28,15 @@ fn d_clock_format() -> String { "hm".into() }
 fn d_true() -> bool { true }
 fn d_false() -> bool { false }
 
+/// 全部主题
+const THEMES: &[&str] = &[
+    "dark", "light", "indigo", "ocean", "forest", "grape", "sunset", "rose", "paper", "mint",
+];
+/// 暗基调主题（亮暗切换槽的合法性校验用）
+const DARK_THEMES: &[&str] = &["dark", "indigo", "ocean", "forest", "grape", "sunset", "rose"];
+/// 亮基调主题
+const LIGHT_THEMES: &[&str] = &["light", "paper", "mint"];
+
 /// 自定义边界：左右各最多缩进 70%，且两侧合计不得超过 70%（剩余显示区 ≥ 30%）
 const CROP_MAX_SIDE: f64 = 70.0;
 
@@ -78,6 +87,10 @@ pub struct Period {
 #[serde(default)]
 pub struct Config {
     pub theme: String,
+    /// 亮暗切换的两个"槽"：最近使用的暗色主题 / 亮色主题。
+    /// 切换按钮在两个槽之间翻，不会把彩色主题顶掉。
+    pub theme_dark: String,
+    pub theme_light: String,
     pub mode: String,
     pub half: String,
     pub screen: u32,
@@ -101,6 +114,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             theme: d_theme(),
+            theme_dark: "dark".into(),
+            theme_light: "light".into(),
             mode: d_mode(),
             half: d_half(),
             screen: 0,
@@ -202,16 +217,16 @@ pub fn normalize(mut cfg: Config) -> Normalized {
     }
     // 彩色主题：暗色系 6 个 + 亮色系 2 个。对比度约束比初版放宽
     // （实测低一些也没问题），只要别低到看不清。
-    fix(
-        &mut cfg.theme,
-        &[
-            "dark", "light", "indigo", "ocean", "forest", "grape", "sunset", "rose", "paper",
-            "mint",
-        ],
-        "dark",
-        "主题 theme",
-        &mut warnings,
-    );
+    fix(&mut cfg.theme, THEMES, "dark", "主题 theme", &mut warnings);
+    // 亮暗槽：只认属于自己基调的主题，写错就回默认
+    fix(&mut cfg.theme_dark, THEMES, "dark", "暗色槽 theme_dark", &mut warnings);
+    if !DARK_THEMES.contains(&cfg.theme_dark.as_str()) {
+        cfg.theme_dark = "dark".into();
+    }
+    fix(&mut cfg.theme_light, THEMES, "light", "亮色槽 theme_light", &mut warnings);
+    if !LIGHT_THEMES.contains(&cfg.theme_light.as_str()) {
+        cfg.theme_light = "light".into();
+    }
     fix(&mut cfg.mode, &["fullscreen", "window", "float"], "fullscreen", "显示模式 mode", &mut warnings);
     fix(&mut cfg.half, &["full", "left", "right", "custom"], "full", "半屏 half", &mut warnings);
     fix(&mut cfg.contrast, &["A", "A2", "B", "C"], "A2", "对比度 contrast", &mut warnings);
@@ -392,7 +407,11 @@ pub fn default_config_text() -> String {
     s.push_str("# float_x / float_y : 浮窗位置（物理像素），-1 = 不指定\n");
     s.push_str("# clock_format: hm（19:29）/ hms（19:29:53）\n");
     s.push_str("# title   : 顶部标题，留空则不显示\n\n");
+    s.push_str("# theme_dark / theme_light : 亮暗切换的两个\"槽\"——最近用的暗色/亮色主题，\n");
+    s.push_str("#           切换按钮在这两个之间翻，不会把彩色主题顶掉（程序自动维护）\n");
     s.push_str(&format!("theme        = \"{}\"\n", base.theme));
+    s.push_str(&format!("theme_dark   = \"{}\"\n", base.theme_dark));
+    s.push_str(&format!("theme_light  = \"{}\"\n", base.theme_light));
     s.push_str(&format!("mode         = \"{}\"\n", base.mode));
     s.push_str(&format!("half         = \"{}\"\n", base.half));
     s.push_str(&format!("screen       = {}\n", base.screen));
