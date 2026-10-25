@@ -44,6 +44,11 @@ export class FloatWidget {
 
   /** 拖动状态机：idle → pending(按下未动) → starting → native(系统拖动) / manual(手动 setPosition) */
   private drag: "idle" | "pending" | "starting" | "native" | "manual" = "idle";
+  /** 触屏/触笔走手动拖动：系统原生 startDragging 在触摸流已经开始后才下发
+   *  WM_NCLBUTTONDOWN，Windows 不认 —— 实测触屏下原生拖动完全不生效。
+   *  鼠标保留原生（更跟手），触摸改用逐帧 setPosition 跟随。 */
+  private preferManual = false;
+  private manualReady = false;
   private startPtr = { x: 0, y: 0 };
   private startWin = { x: 0, y: 0 };
 
@@ -141,19 +146,29 @@ export class FloatWidget {
       })
       .catch(() => {
         // 非 Tauri 环境或原生拖动不可用：手动 setPosition 跟随
-        this.drag = "manual";
-        getCurrentWindow()
-          .outerPosition()
-          .then((p) => {
-            this.startWin = { x: p.x, y: p.y };
-          })
-          .catch(() => {
-            this.startWin = { x: 0, y: 0 };
-          });
+        this.beginManualDrag();
+      });
+  }
+
+  /** 手动拖动：逐帧 setPosition 跟随指针。触屏固定走这条路（见 preferManual 注释）。
+   *  窗口当前位置是异步拿的，拿到之前忽略 move 事件 —— 否则起点是 (0,0)，
+   *  窗口会先跳到左上角再开始跟。 */
+  private beginManualDrag(): void {
+    this.drag = "manual";
+    this.manualReady = false;
+    getCurrentWindow()
+      .outerPosition()
+      .then((p) => {
+        this.startWin = { x: p.x, y: p.y };
+        this.manualReady = true;
+      })
+      .catch(() => {
+        this.drag = "idle"; // 连窗口位置都拿不到（浏览器预览），放弃拖动
       });
   }
 
   private async manualDragTo(ev: PointerEvent): Promise<void> {
+    if (!this.manualReady) return;
     const x = this.startWin.x + Math.round(ev.clientX - this.startPtr.x);
     const y = this.startWin.y + Math.round(ev.clientY - this.startPtr.y);
     // startWin 是物理像素，clientXY 是逻辑像素 —— 大多数单屏场景缩放一致，
@@ -213,6 +228,8 @@ export class FloatWidget {
     this.root.addEventListener("pointerdown", (ev) => {
       if (ev.button !== 0 || this.inInteractive(ev)) return;
       this.drag = "pending";
+      // 触屏/触笔不能用系统原生拖动（见 preferManual 注释），直接记下来
+      this.preferManual = ev.pointerType !== "mouse";
       this.startPtr = { x: ev.clientX, y: ev.clientY };
       try {
         this.root.setPointerCapture(ev.pointerId);
@@ -224,7 +241,13 @@ export class FloatWidget {
     this.root.addEventListener("pointermove", (ev) => {
       if (this.drag === "pending") {
         const d = Math.hypot(ev.clientX - this.startPtr.x, ev.clientY - this.startPtr.y);
-        if (d > TAP_SLOP) void this.beginNativeDrag();
+        if (d > TAP_SLOP) {
+          // 手动拖动的起点取"越过阈值那一刻"的指针位置，避免把阈值前的
+          // 那点位移也算进去导致窗口起步跳动
+          this.startPtr = { x: ev.clientX, y: ev.clientY };
+          if (this.preferManual) this.beginManualDrag();
+          else this.beginNativeDrag();
+        }
       } else if (this.drag === "manual") {
         void this.manualDragTo(ev);
       }

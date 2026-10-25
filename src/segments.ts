@@ -97,7 +97,14 @@ export function applyNow(segments: Segment[], nowMin: number): { segments: Segme
 }
 
 /**
- * 拉长规则（与设计稿一致）：
+ * 进度条"当前段横向拉长"的总开关。
+ * 实测一天晚自习后停用：拉长反而让进度条宽度反复横跳、分散注意力；
+ * 实现逻辑完整保留（下方 growWeights），想恢复改回 true 即可。
+ */
+export const GROW_ENABLED = false;
+
+/**
+ * 拉长规则（与设计稿一致，当前由 GROW_ENABLED 停用）：
  *   · 目标长度 = 该段原始时长占比 × GROW_TARGET(250%)
  *   · 上限     = 总宽的 GROW_CAP(70%)
  *   · 其余段按比例让位，保证整条精确占满 100%
@@ -115,6 +122,7 @@ export function growWeights(
   if (total <= 0) return new Array(n).fill(1 / n);
 
   const base = segments.map((s) => s.dur / total); // 原始占比，和为 1
+  if (!GROW_ENABLED) return base;                  // 停用：各段按真实时长占比，不拉长
   if (nowIndex < 0) return base;
 
   const wantNow = Math.min(base[nowIndex] * growTarget, growCap);

@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { LogicalSize, PhysicalPosition, availableMonitors, getCurrentWindow } from "@tauri-apps/api/window";
 
 import {
+  activePeriods,
   cloneConfig,
   defaultConfig,
   durationOf,
@@ -15,6 +16,7 @@ import {
   type Config,
   type ConfigEnvelope,
   type Period,
+  type Plan,
   type Theme,
 } from "./config";
 import { CropController } from "./crop";
@@ -56,10 +58,15 @@ const dom = {
     screen: $("f-screen") as HTMLSelectElement,
     clockFormat: $("f-clockfmt") as HTMLSelectElement,
     title: $("f-title") as HTMLInputElement,
+    timeOffset: $("f-timeoffset") as HTMLInputElement,
+    plan: $("f-plan") as HTMLSelectElement,
+    planName: $("f-plan-name") as HTMLInputElement,
     barEnabled: $("f-bar-enabled") as HTMLSelectElement,
     barNames: $("f-bar-names") as HTMLSelectElement,
     barGap: $("f-bar-gap") as HTMLSelectElement,
   },
+  btnPlanAdd: $("btn-plan-add") as HTMLButtonElement,
+  btnPlanDel: $("btn-plan-del") as HTMLButtonElement,
 };
 /* ------------------------------------------------------------------ 状态 */
 
@@ -113,6 +120,13 @@ const crop = new CropController(document, {
 const BASE_TITLE = "BigClock";
 document.title = BASE_TITLE;
 
+/** 展示用时间 = 系统时间 + 配置偏移（秒，可正可负）。
+ *  学校的挂钟/打铃不一定准，按实测偏移校准显示；日期跟着偏移后的时间走
+ *  （负偏移跨过零点时日期也自动对）。所有取"现在"的地方一律走这里。 */
+function nowDate(): Date {
+  return new Date(Date.now() + cfg.time_offset * 1000);
+}
+
 /* ------------------------------------------------------------------ 自检
    把"前端确实跑起来了"这件事写到 document.title 上。
    做端到端验收时不用开 devtools、也不用抓控制台 —— Rust 侧读窗口标题就知道
@@ -162,7 +176,7 @@ function applyTheme(c: Config): void {
  * 保证"数据 → 界面"永远单向、不会出现两处各改一半。
  */
 function repaint(force = false): void {
-  const now = new Date();
+  const now = nowDate();
   const key = `${now.getHours()}:${now.getMinutes()}`;
 
   applyTheme(cfg);
@@ -182,7 +196,7 @@ function repaint(force = false): void {
 
   if (force || key !== lastAppliedKey) {
     lastAppliedKey = key;
-    segments = buildSegments(cfg.periods, cfg.bar.gap_minutes);
+    segments = buildSegments(activePeriods(cfg), cfg.bar.gap_minutes);
   }
   const res = applyNow(segments, nowMinutes(now));
   nowIndex = res.nowIndex;
@@ -200,7 +214,7 @@ function paintClock(now: Date): void {
 }
 
 function tickFast(): void {
-  const now = new Date();
+  const now = nowDate();
   paintClock(now);
   if (segments.length) {
     const res = applyNow(segments, nowMinutes(now));
@@ -299,10 +313,39 @@ function isOpen(): boolean {
   return !dom.settings.hidden;
 }
 
+/** editing/cfg 当前生效的方案（按 active_plan 匹配，失配退回第一个） */
+function activePlanOf(c: Config): Plan {
+  return c.plans.find((p) => p.name === c.active_plan) ?? c.plans[0];
+}
+
+/** 起一个不与现有方案重名的名字（下拉按名字索引，必须唯一） */
+function uniquePlanName(c: Config, base: string): string {
+  let name = base;
+  let n = 2;
+  while (c.plans.some((p) => p.name === name)) {
+    name = `${base} ${n}`;
+    n += 1;
+  }
+  return name;
+}
+
+/** 方案下拉的选项 + 删除按钮的可用态（只剩一套时不许删） */
+function fillPlanSelect(c: Config): void {
+  dom.f.plan.textContent = "";
+  for (const p of c.plans) {
+    const o = document.createElement("option");
+    o.value = p.name;
+    o.textContent = p.name;
+    dom.f.plan.appendChild(o);
+  }
+  dom.f.plan.value = activePlanOf(c).name;
+  dom.btnPlanDel.disabled = c.plans.length <= 1;
+}
+
 function openSettings(): void {
   if (isOpen()) return;
   editing = cloneConfig(cfg);
-  periodsDraft = editing.periods.map((p) => ({ ...p }));
+  periodsDraft = activePlanOf(editing).periods.map((p) => ({ ...p }));
   fillForm(editing);
   dom.settings.hidden = false;
   document.body.classList.add("settings-open");
@@ -335,6 +378,9 @@ function fillForm(c: Config): void {
   dom.f.mode.value = c.mode;
   dom.f.clockFormat.value = c.clock_format;
   dom.f.title.value = c.title;
+  dom.f.timeOffset.value = c.time_offset ? String(c.time_offset) : "";
+  fillPlanSelect(c);
+  dom.f.planName.value = activePlanOf(c).name;
   dom.f.barEnabled.value = String(c.bar.enabled);
   dom.f.barNames.value = String(c.bar.show_names);
   dom.f.barGap.value = String(c.bar.gap_minutes);
@@ -384,10 +430,14 @@ function readForm(): void {
   editing.screen = Number(dom.f.screen.value) || 0;
   editing.clock_format = dom.f.clockFormat.value as Config["clock_format"];
   editing.title = dom.f.title.value;
+  // 时间偏移：空串当 0；非数字 Number() 得 NaN → || 0 兜底；允许负数和超过 60 的值
+  editing.time_offset = Math.round(Number(dom.f.timeOffset.value) || 0);
+  editing.active_plan = dom.f.plan.value || activePlanOf(editing).name;
   editing.bar.enabled = dom.f.barEnabled.value === "true";
   editing.bar.show_names = dom.f.barNames.value === "true";
   editing.bar.gap_minutes = dom.f.barGap.value === "true";
-  editing.periods = periodsDraft.map((p) => ({ ...p }));
+  // 当前方案的时段草稿写回所属方案（其它方案不动）
+  activePlanOf(editing).periods = periodsDraft.map((p) => ({ ...p }));
 }
 
 function isDirty(): boolean {
@@ -504,10 +554,9 @@ function refreshDraft(): void {
   issuesByIndex = new Map(issues.map((x) => [x.index, x.message]));
 
   // 立刻预览：把草稿套用到展示层，所见即所得
+  // （readForm 已把 periodsDraft 写进 editing 的当前方案，clone 即包含）
   if (editing) {
-    const preview = cloneConfig(editing);
-    preview.periods = periodsDraft.map((p) => ({ ...p }));
-    cfg = preview;
+    cfg = cloneConfig(editing);
     repaint(true);
     void refitAfterLayout();
   }
@@ -555,7 +604,7 @@ async function saveSettings(): Promise<void> {
   if (issues.length) {
     issuesByIndex = new Map(issues.map((x) => [x.index, x.message]));
     await refreshRowErrors();
-    toast(`作息表有 ${issues.length} 处问题，先改好再保存`, true);
+    toast(`当前方案有 ${issues.length} 处问题，先改好再保存`, true);
     return;
   }
   if (!periodsDraft.length) {
@@ -563,8 +612,9 @@ async function saveSettings(): Promise<void> {
     return;
   }
 
+  // 归一化当前方案的时段（其它方案原样提交，后端会各自校验）
   const payload: Config = cloneConfig(editing);
-  payload.periods = periodsDraft.map((p) => ({
+  activePlanOf(payload).periods = periodsDraft.map((p) => ({
     name: p.name.trim(),
     start: normalizeTime(p.start) ?? p.start,
     end: normalizeTime(p.end) ?? p.end,
@@ -588,7 +638,7 @@ async function saveSettings(): Promise<void> {
 
 function revertSettings(): void {
   editing = cloneConfig(cfg);
-  periodsDraft = editing.periods.map((p) => ({ ...p }));
+  periodsDraft = activePlanOf(editing).periods.map((p) => ({ ...p }));
   issuesByIndex.clear();
   fillForm(editing);
   renderPeriodRows();
@@ -1018,7 +1068,8 @@ function wireSettingsUI(): void {
         applyEnvelope(env, true);
         if (isOpen()) {
           editing = cloneConfig(cfg);
-          periodsDraft = editing.periods.map((p) => ({ ...p }));
+          periodsDraft = activePlanOf(editing).periods.map((p) => ({ ...p }));
+          fillForm(editing);
           renderPeriodRows();
           markDirty(false);
         }
@@ -1031,12 +1082,73 @@ function wireSettingsUI(): void {
 
   const fields: (keyof typeof dom.f)[] = [
     "theme", "contrast", "tint", "mode", "screen",
-    "clockFormat", "title", "barEnabled", "barNames", "barGap",
+    "clockFormat", "title", "timeOffset", "barEnabled", "barNames", "barGap",
   ];
   for (const k of fields) {
     dom.f[k].addEventListener("change", () => refreshDraft());
     dom.f[k].addEventListener("input", () => refreshDraft());
   }
+
+  // ---- 作息方案：切换 / 改名 / 另存新方案 / 删除 ----
+  // 切换方案：★ change 触发时 dom.f.plan.value 已经是新方案 —— 必须先把
+  // 当前草稿存回【旧】方案再切换；直接 readForm 会把旧草稿写进新方案，
+  // 表现就是"在这套方案里改的时段跑到另一套里去了"。
+  dom.f.plan.addEventListener("change", () => {
+    if (!editing) return;
+    const activeName = editing.active_plan; // 闭包里 editing 的空值窄化会丢，先取出来
+    const prev = editing.plans.find((p) => p.name === activeName) ?? editing.plans[0];
+    prev.periods = periodsDraft.map((p) => ({ ...p }));
+    editing.active_plan = dom.f.plan.value || activeName;
+    periodsDraft = activePlanOf(editing).periods.map((p) => ({ ...p }));
+    dom.f.planName.value = activePlanOf(editing).name;
+    issuesByIndex.clear();
+    renderPeriodRows();
+    refreshDraft(); // 里面的 readForm 把（新方案的）草稿写回新方案，等于空写
+  });
+
+  // 改名：同步方案名与 active_plan（下拉按名字索引，必须唯一，重名自动加序号）
+  dom.f.planName.addEventListener("input", () => {
+    if (!editing) return;
+    const raw = dom.f.planName.value.trim();
+    if (!raw) return;
+    const plan = activePlanOf(editing);
+    const oldName = plan.name;
+    const others = editing.plans.filter((p) => p !== plan);
+    const name = uniquePlanName({ ...editing, plans: others }, raw);
+    plan.name = name;
+    if (editing.active_plan === oldName) editing.active_plan = name;
+    fillPlanSelect(editing);
+    refreshDraft();
+  });
+
+  // 另存新方案：以当前时段草稿为底稿复制一套（上午/晚上常常只是微调）
+  dom.btnPlanAdd.addEventListener("click", () => {
+    if (!editing) return;
+    readForm();
+    const name = uniquePlanName(editing, "新方案");
+    editing.plans.push({ name, periods: periodsDraft.map((p) => ({ ...p })) });
+    editing.active_plan = name;
+    fillPlanSelect(editing);
+    dom.f.planName.value = name;
+    refreshDraft();
+    dom.f.planName.focus();
+    dom.f.planName.select();
+  });
+
+  // 删除当前方案（只剩一套时按钮是禁用的）
+  dom.btnPlanDel.addEventListener("click", () => {
+    if (!editing || editing.plans.length <= 1) return;
+    readForm();
+    const delName = editing.active_plan; // 闭包里 editing 的空值窄化会丢，先取出来
+    editing.plans = editing.plans.filter((p) => p.name !== delName);
+    editing.active_plan = editing.plans[0].name;
+    periodsDraft = activePlanOf(editing).periods.map((p) => ({ ...p }));
+    fillPlanSelect(editing);
+    dom.f.planName.value = activePlanOf(editing).name;
+    issuesByIndex.clear();
+    renderPeriodRows();
+    refreshDraft();
+  });
 
   // 点遮罩关闭
   dom.settings.addEventListener("mousedown", (e) => {

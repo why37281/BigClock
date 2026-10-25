@@ -51,9 +51,29 @@ fn clamp_float_size(v: f64, min: f64, max: f64) -> f64 {
     v.clamp(min, max)
 }
 
-/// 默认作息表：按需求只留一段 18:40–19:00，其余由用户在设置界面自己加
+/// 默认作息：按用户学校实际晚自习时间表
 fn d_periods() -> Vec<Period> {
-    vec![Period { name: "晚自习".into(), start: "18:40".into(), end: "19:00".into() }]
+    vec![
+        Period { name: "晚读".into(), start: "18:30".into(), end: "19:00".into() },
+        Period { name: "第一节".into(), start: "19:00".into(), end: "19:40".into() },
+        Period { name: "第二节".into(), start: "19:50".into(), end: "20:30".into() },
+        Period { name: "第三节".into(), start: "20:40".into(), end: "21:30".into() },
+    ]
+}
+
+fn d_active_plan() -> String { "晚自习".into() }
+
+/// 一套作息方案：名字 + 完整时段表（上午自习、晚自习各一套，随时切换）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Plan {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub periods: Vec<Period>,
+}
+
+fn d_plans() -> Vec<Plan> {
+    vec![Plan { name: d_active_plan(), periods: d_periods() }]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +118,15 @@ pub struct Config {
     pub tint: String,
     pub clock_format: String,
     pub title: String,
+    /// 展示时间的偏移量（秒，可正可负）：学校挂钟/打铃不准时校准用
+    pub time_offset: i32,
+    /// 多套作息方案（上午自习 / 晚自习各一套，随时切换）
+    pub plans: Vec<Plan>,
+    /// 当前生效的方案名
+    pub active_plan: String,
+    /// 旧版单表字段：只为读入旧配置文件时迁移用，保存时不再写出
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub periods: Vec<Period>,
     /// 自定义边界（half = "custom" 时生效）：左右各缩进视口宽的百分比 0..70
     pub crop_left: f64,
     pub crop_right: f64,
@@ -107,7 +136,6 @@ pub struct Config {
     pub float_x: i64,
     pub float_y: i64,
     pub bar: BarConfig,
-    pub periods: Vec<Period>,
 }
 
 impl Default for Config {
@@ -123,6 +151,9 @@ impl Default for Config {
             tint: d_tint(),
             clock_format: d_clock_format(),
             title: String::new(),
+            time_offset: 0,
+            plans: d_plans(),
+            active_plan: d_active_plan(),
             crop_left: 0.0,
             crop_right: 0.0,
             float_w: 0.0,
@@ -130,7 +161,7 @@ impl Default for Config {
             float_x: -1,
             float_y: -1,
             bar: BarConfig::default(),
-            periods: d_periods(),
+            periods: Vec::new(),
         }
     }
 }
@@ -271,62 +302,119 @@ pub fn normalize(mut cfg: Config) -> Normalized {
         cfg.float_y = -1;
     }
 
-    // ---- 时段 ----
-    let had_periods = !cfg.periods.is_empty();
-    let mut out: Vec<Period> = Vec::new();
-    let mut spans: Vec<(i64, i64)> = Vec::new();
+    // ---- 时间偏移：秒，可正可负，±一天以内 ----
+    cfg.time_offset = cfg.time_offset.clamp(-86_400, 86_400);
 
-    for (i, p) in cfg.periods.iter().enumerate() {
-        let idx = i as i64;
-        let name = p.name.trim().to_string();
-        let a = parse_time(&p.start);
-        let b = parse_time(&p.end);
+    // ---- 旧版单表迁移：periods 非空且没有 plans → 包成一套"晚自习"方案 ----
+    if cfg.plans.is_empty() && !cfg.periods.is_empty() {
+        cfg.plans = vec![Plan { name: "晚自习".into(), periods: std::mem::take(&mut cfg.periods) }];
+    }
+    cfg.periods.clear(); // 旧字段只读不写
 
+    // ---- 作息方案 ----
+    if cfg.plans.is_empty() {
+        cfg.plans = d_plans();
+        warnings.push("配置里没有任何作息方案，已回退到默认".into());
+    }
+    // 方案名兜底：空名 → 方案N；重名 → 加序号（下拉按名字索引，必须唯一）
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (i, plan) in cfg.plans.iter_mut().enumerate() {
+        let mut name = plan.name.trim().to_string();
         if name.is_empty() {
-            issues.push(Issue { index: idx, message: "段名不能为空".into() });
+            name = format!("方案 {}", i + 1);
         }
-        let (Some(a), Some(b)) = (a, b) else {
-            issues.push(Issue {
-                index: idx,
-                message: format!("时间看不懂：「{}」→「{}」，写成 18:40 或 1840", p.start, p.end),
-            });
-            continue;
-        };
-
-        let b2 = if b <= a { b + 1440 } else { b }; // 跨零点
-        if b2 == a {
-            issues.push(Issue { index: idx, message: "开始与结束相同，算不出时长".into() });
-            continue;
+        let mut candidate = name.clone();
+        let mut n = 2;
+        while seen.contains(&candidate) {
+            candidate = format!("{name} {n}");
+            n += 1;
         }
-
-        out.push(Period { name, start: fmt_time(a), end: fmt_time(b2) });
-        spans.push((a, b2));
+        seen.insert(candidate.clone());
+        plan.name = candidate;
+    }
+    if !cfg.plans.iter().any(|p| p.name == cfg.active_plan) {
+        let first = cfg.plans[0].name.clone();
+        warnings.push(format!("当前方案「{}」不存在，已改用「{first}」", cfg.active_plan));
+        cfg.active_plan = first;
     }
 
-    // 重叠检测（按展开后的区间）
-    let mut order: Vec<usize> = (0..spans.len()).collect();
-    order.sort_by_key(|&i| spans[i].0);
-    for k in 1..order.len() {
-        let (pi, ci) = (order[k - 1], order[k]);
-        if spans[ci].0 < spans[pi].1 {
-            issues.push(Issue {
-                index: ci as i64,
-                message: format!(
+    // ---- 各方案的时段：活跃方案严格校验（issue 会拦保存，界面上能改）；
+    //      非活跃方案宽松处理（坏条目直接丢，记 warning）——设置界面编辑不了
+    //      非活跃方案，严格拦住会把用户锁死在保存之外 ----
+    for plan in cfg.plans.iter_mut() {
+        let strict = plan.name == cfg.active_plan;
+        let plan_name = plan.name.clone();
+        let mut out: Vec<Period> = Vec::new();
+        let mut spans: Vec<(i64, i64)> = Vec::new();
+        let mut dropped = 0u32;
+
+        for (i, p) in plan.periods.iter().enumerate() {
+            let idx = i as i64;
+            let name = p.name.trim().to_string();
+            let a = parse_time(&p.start);
+            let b = parse_time(&p.end);
+
+            // 记一条问题：活跃方案记 issue（拦保存），其余只计数
+            macro_rules! report {
+                ($msg:expr) => {
+                    if strict {
+                        issues.push(Issue { index: idx, message: $msg });
+                    } else {
+                        dropped += 1;
+                    }
+                };
+            }
+
+            if name.is_empty() {
+                report!("段名不能为空".into());
+            }
+            let (Some(a), Some(b)) = (a, b) else {
+                report!(format!("时间看不懂：「{}」→「{}」，写成 18:40 或 1840", p.start, p.end));
+                continue;
+            };
+
+            let b2 = if b <= a { b + 1440 } else { b }; // 跨零点
+            if b2 == a {
+                report!("开始与结束相同，算不出时长".into());
+                continue;
+            }
+
+            out.push(Period { name, start: fmt_time(a), end: fmt_time(b2) });
+            spans.push((a, b2));
+        }
+
+        // 重叠检测（按展开后的区间），同样只对活跃方案报告
+        let mut order: Vec<usize> = (0..spans.len()).collect();
+        order.sort_by_key(|&i| spans[i].0);
+        for k in 1..order.len() {
+            let (pi, ci) = (order[k - 1], order[k]);
+            if spans[ci].0 < spans[pi].1 {
+                let msg = format!(
                     "与「{}」时间重叠",
                     out.get(pi).map(|p| p.name.as_str()).unwrap_or("上一段")
-                ),
-            });
+                );
+                if strict {
+                    issues.push(Issue { index: ci as i64, message: msg });
+                } else {
+                    dropped += 1;
+                }
+            }
+        }
+
+        if out.is_empty() {
+            if strict {
+                // 活跃方案不能是空的（进度条至少要有一段）；空了给默认，提示但不拦保存
+                plan.periods = d_periods();
+                warnings.push(format!("方案「{plan_name}」没有任何可用时段，已回退到默认作息"));
+            }
+            // 非活跃的空方案保持原样：没有可丢的条目，也不需要提示
+        } else {
+            plan.periods = out;
+            if dropped > 0 && !strict {
+                warnings.push(format!("方案「{plan_name}」有 {dropped} 处看不懂/冲突的时段，已忽略"));
+            }
         }
     }
-
-    if out.is_empty() {
-        if had_periods {
-            warnings.push("作息表里没有任何可用时段，已回退到默认的 18:40–19:00".into());
-        }
-        out = d_periods();
-    }
-
-    cfg.periods = out;
     Normalized { config: cfg, warnings, issues }
 }
 
@@ -423,7 +511,25 @@ pub fn default_config_text() -> String {
     s.push_str(&format!("float_h      = {}\n", base.float_h));
     s.push_str(&format!("float_x      = {}\n", base.float_x));
     s.push_str(&format!("float_y      = {}\n", base.float_y));
+    s.push_str("# clock_format = \"{}\"\n");
+    s.push_str("# time_offset  : 展示时间的偏移量（秒，可正可负）——学校挂钟/打铃不准时校准用\n");
+    s.push_str("# title   : 顶部标题，留空则不显示\n\n");
+    s.push_str(&format!("theme        = \"{}\"\n", base.theme));
+    s.push_str(&format!("theme_dark   = \"{}\"\n", base.theme_dark));
+    s.push_str(&format!("theme_light  = \"{}\"\n", base.theme_light));
+    s.push_str(&format!("mode         = \"{}\"\n", base.mode));
+    s.push_str(&format!("half         = \"{}\"\n", base.half));
+    s.push_str(&format!("screen       = {}\n", base.screen));
+    s.push_str(&format!("contrast     = \"{}\"\n", base.contrast));
+    s.push_str(&format!("tint         = \"{}\"\n", base.tint));
+    s.push_str(&format!("crop_left    = {}\n", base.crop_left));
+    s.push_str(&format!("crop_right   = {}\n", base.crop_right));
+    s.push_str(&format!("float_w      = {}\n", base.float_w));
+    s.push_str(&format!("float_h      = {}\n", base.float_h));
+    s.push_str(&format!("float_x      = {}\n", base.float_x));
+    s.push_str(&format!("float_y      = {}\n", base.float_y));
     s.push_str(&format!("clock_format = \"{}\"\n", base.clock_format));
+    s.push_str(&format!("time_offset  = {}\n", base.time_offset));
     s.push_str(&format!("title        = \"{}\"\n\n", base.title));
 
     s.push_str("# ---------- 进度条 ----------\n");
@@ -435,17 +541,25 @@ pub fn default_config_text() -> String {
     s.push_str(&format!("show_names  = {}\n", base.bar.show_names));
     s.push_str(&format!("gap_minutes = {}\n\n", base.bar.gap_minutes));
 
-    s.push_str("# ---------- 作息表 ----------\n");
+    s.push_str("# ---------- 作息方案 ----------\n");
+    s.push_str("# 可以有多套方案（上午自习 / 晚自习各一套），在设置界面里随时切换。\n");
+    s.push_str("# active_plan 指当前生效的方案名（按 name 匹配）。\n");
     s.push_str("# 进度条按每段的真实时长分配宽度（长课长胶囊，课间短胶囊）。\n");
     s.push_str("# 时间写法很宽松：18:40 / 1840 / 全角 18：40 都认；\n");
     s.push_str("# 跨零点也支持，例如 start = \"23:30\", end = \"00:10\"。\n");
     s.push_str("# 空档如果开了 gap_minutes，会自动补成「课间」。\n");
     s.push_str("# 在设置界面里改完保存，这个文件会被重写（注释会丢，属正常）。\n\n");
-    for p in &base.periods {
-        s.push_str("[[periods]]\n");
-        s.push_str(&format!("name  = \"{}\"\n", p.name));
-        s.push_str(&format!("start = \"{}\"\n", p.start));
-        s.push_str(&format!("end   = \"{}\"\n\n", p.end));
+    s.push_str(&format!("active_plan = \"{}\"\n\n", base.active_plan));
+    for plan in &base.plans {
+        s.push_str("[[plans]]\n");
+        s.push_str(&format!("name = \"{}\"\n", plan.name));
+        for p in &plan.periods {
+            s.push_str("\n[[plans.periods]]\n");
+            s.push_str(&format!("name  = \"{}\"\n", p.name));
+            s.push_str(&format!("start = \"{}\"\n", p.start));
+            s.push_str(&format!("end   = \"{}\"\n", p.end));
+        }
+        s.push('\n');
     }
     s
 }

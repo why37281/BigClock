@@ -185,11 +185,25 @@
     </div>
 
     <div class="settings-body">
-      <!-- ---------- 作息表 ---------- -->
+      <!-- ---------- 作息方案 ---------- -->
+      <section class="sec">
+        <div class="sec-head">
+          <h2>作息方案</h2>
+          <span class="hint">每套方案一份完整作息（如上午自习 / 晚自习各一套），进度条随方案切换</span>
+        </div>
+        <div class="plan-row">
+          <select id="f-plan" aria-label="选择作息方案"></select>
+          <input type="text" id="f-plan-name" maxlength="20" placeholder="当前方案名" aria-label="方案名" />
+          <button class="btn" id="btn-plan-add">另存新方案</button>
+          <button class="btn ghost" id="btn-plan-del">删除</button>
+        </div>
+      </section>
+
+      <!-- ---------- 作息表（编辑当前方案） ---------- -->
       <section class="sec">
         <div class="sec-head">
           <h2>作息表</h2>
-          <span class="hint">进度条按每段真实时长分配宽度</span>
+          <span class="hint">进度条按每段真实时长分配宽度，编辑的是当前选中的方案</span>
         </div>
         <div class="periods" id="periods"></div>
         <div class="sec-foot">
@@ -230,6 +244,11 @@
               <option value="hm">时:分（19:29）</option>
               <option value="hms">时:分 + 秒数小尾巴（19:29 53）</option>
             </select>
+          </label>
+
+          <label class="field span2">
+            <span>时间偏移（秒，可正可负；学校挂钟不准时校准用，如 +8）</span>
+            <input type="number" id="f-timeoffset" step="1" placeholder="0" />
           </label>
 
           <label class="field span2">

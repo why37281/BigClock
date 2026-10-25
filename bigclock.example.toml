@@ -31,6 +31,8 @@
 # float_w / float_h : 浮窗大小（逻辑像素），0 = 用默认（640×260）
 # float_x / float_y : 浮窗位置（物理像素），-1 = 不指定
 # clock_format: hm（19:29）/ hms（19:29:53）
+# time_offset : 展示时间的偏移量（秒，可正可负，允许超过 ±60）——
+#               学校挂钟/打铃不准时校准用（实测 +8 秒能对上，按自己学校改）
 # title   : 顶部标题，留空则不显示
 theme        = "dark"
 theme_dark   = "dark"
@@ -47,6 +49,7 @@ float_h      = 0.0
 float_x      = -1
 float_y      = -1
 clock_format = "hm"
+time_offset  = 0
 title        = ""
 
 # ---------- 进度条 ----------
@@ -58,18 +61,43 @@ enabled     = true
 show_names  = false
 gap_minutes = true
 
-# ---------- 作息表 ----------
+# ---------- 作息方案 ----------
+# 可以有多套方案（上午自习 / 晚自习各一套），在设置界面里随时切换，
+# active_plan 是当前生效的方案名（按 name 匹配）。
 # 进度条按每段的真实时长分配宽度（长课长胶囊，课间短胶囊）。
 # 时间写法很宽松：18:40 / 1840 / 全角 18：40 都认。
 # 跨零点也支持，例如 start = "23:30", end = "00:10"。
 # 段名不能为空，时段之间不能重叠（重叠会被程序拒绝保存并提示）。
-[[periods]]
-name  = "晚自习"
-start = "18:40"
+active_plan = "晚自习"
+
+[[plans]]
+name = "晚自习"
+
+[[plans.periods]]
+name  = "晚读"
+start = "18:30"
 end   = "19:00"
 
-# 再加时段就照抄上面三行：
-# [[periods]]
-# name  = "第一节"
-# start = "19:00"
-# end   = "19:40"
+[[plans.periods]]
+name  = "第一节"
+start = "19:00"
+end   = "19:40"
+
+[[plans.periods]]
+name  = "第二节"
+start = "19:50"
+end   = "20:30"
+
+[[plans.periods]]
+name  = "第三节"
+start = "20:40"
+end   = "21:30"
+
+# 再加方案就照抄上面四行一组（名字不能重复）：
+# [[plans]]
+# name = "上午自习"
+#
+# [[plans.periods]]
+# name  = "早读"
+# start = "7:30"
+# end   = "8:10"

@@ -183,6 +183,15 @@ body {
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
   cursor: default;
+  /* 展示状态的文字一律不可选中：大屏教室里有苍蝇落在屏上乱拖，会把时间"搓"成
+     一片选区高亮。输入控件（设置面板的输入框/下拉）在下面单独放开。 */
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* 输入控件保持可选中：user-select:none 会连输入框内部的文本选择一起禁掉 */
+input, textarea, select {
+  user-select: text;
+  -webkit-user-select: text;
 }
 /* 展示状态下由 WebView2 自己处理光标（全屏 + 鼠标静止时自动隐藏），
    不再需要 Rust 侧轮询 GetCursorPos。这里只保证设置界面里光标正常。 */
@@ -445,6 +454,20 @@ body.settings-open #devbar { opacity: 0; pointer-events: none; }
   padding: 8px 10px; min-width: 0;
 }
 .field input:focus, .field select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ---------- 作息方案 ---------- */
+.plan-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.plan-row select, .plan-row input[type="text"] {
+  font: inherit; font-size: 13px;
+  background: var(--field-bg); color: var(--field-fg);
+  border: 1px solid var(--panel-line); border-radius: 9px;
+  padding: 8px 10px; min-width: 0;
+}
+.plan-row select { flex: 0 1 auto; min-width: 9em; }
+.plan-row input[type="text"] { flex: 1 1 8em; min-width: 6em; }
+.plan-row .btn { flex: 0 0 auto; }
 
 /* ---------- 作息表编辑 ---------- */
 .periods { display: flex; flex-direction: column; gap: 8px; }

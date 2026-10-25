@@ -25,6 +25,12 @@ export interface BarConfig {
   gap_minutes: boolean;
 }
 
+/** 一套作息方案：名字 + 完整时段表（上午自习 / 晚自习各一套，随时切换） */
+export interface Plan {
+  name: string;
+  periods: Period[];
+}
+
 export interface Config {
   theme: Theme;
   /** 亮暗切换的两个"槽"：最近使用的暗色 / 亮色主题。切换按钮在两槽之间翻，
@@ -38,6 +44,8 @@ export interface Config {
   tint: Tint;
   clock_format: ClockFormat;
   title: string;
+  /** 展示时间的偏移量（秒，可正可负）：学校挂钟/打铃不准时校准用 */
+  time_offset: number;
 
   /** 自定义边界（half = "custom"）：左右各缩进视口宽的百分比 0..70 */
   crop_left: number;
@@ -50,7 +58,17 @@ export interface Config {
   float_y: number;
 
   bar: BarConfig;
+  /** 多套作息方案 + 当前生效的方案名（按 name 匹配） */
+  plans: Plan[];
+  active_plan: string;
+  /** 旧版单表字段（后端只为迁移读入，前端一律用 plans） */
   periods: Period[];
+}
+
+/** 取某配置当前生效的时段表（方案名失配时退回第一个方案） */
+export function activePeriods(c: Config): Period[] {
+  const plan = c.plans.find((p) => p.name === c.active_plan) ?? c.plans[0];
+  return plan ? plan.periods : [];
 }
 
 /** 彩色主题列表（设置面板下拉用） */
@@ -90,7 +108,17 @@ export interface ConfigEnvelope {
   issues: ValidationIssue[];
 }
 
-/** 默认配置：作息表按用户要求只留一段 18:40–19:00，其余由用户在设置里自己加。 */
+/** 默认作息：按用户学校实际晚自习时间表 */
+export function defaultPeriods(): Period[] {
+  return [
+    { name: "晚读", start: "18:30", end: "19:00" },
+    { name: "第一节", start: "19:00", end: "19:40" },
+    { name: "第二节", start: "19:50", end: "20:30" },
+    { name: "第三节", start: "20:40", end: "21:30" },
+  ];
+}
+
+/** 默认配置：一套"晚自习"方案（用户学校的实际时间表），其余由用户在设置里自己加 */
 export function defaultConfig(): Config {
   return {
     theme: "dark",
@@ -103,6 +131,7 @@ export function defaultConfig(): Config {
     tint: "cyan",
     clock_format: "hm",
     title: "",
+    time_offset: 0,
     crop_left: 0,
     crop_right: 0,
     float_w: 0,
@@ -110,7 +139,9 @@ export function defaultConfig(): Config {
     float_x: -1,
     float_y: -1,
     bar: { enabled: true, show_names: false, gap_minutes: true },
-    periods: [{ name: "晚自习", start: "18:40", end: "19:00" }],
+    plans: [{ name: "晚自习", periods: defaultPeriods() }],
+    active_plan: "晚自习",
+    periods: [],
   };
 }
 
@@ -239,6 +270,7 @@ export function cloneConfig(c: Config): Config {
   return {
     ...c,
     bar: { ...c.bar },
-    periods: c.periods.map((p) => ({ ...p })),
+    plans: c.plans.map((plan) => ({ name: plan.name, periods: plan.periods.map((p) => ({ ...p })) })),
+    periods: [],
   };
 }

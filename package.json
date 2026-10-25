@@ -1,7 +1,7 @@
 {
   "name": "bigclock",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "教室晚自习大屏时钟 —— 4K 大屏时间展示，分段胶囊进度条由作息表驱动",
   "type": "module",
   "scripts": {
