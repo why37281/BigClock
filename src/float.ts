@@ -6,12 +6,27 @@
 
      · 时钟逐位定宽格（与主时钟同一套 markup / 度量，换字零抖动）
      · 点一下卡片 → 弹出按钮排（对应全屏控制条四个按钮）；再点收起
-     · 按住拖动 → 移动窗口（优先走系统原生拖动，触屏同样可用；
-       环境不支持时退化为手动 setPosition）
+     · 按住拖动 → 移动窗口（手动逐帧 setPosition，触屏/鼠标同一套）
      · 右下角手柄 → 改窗口大小，带最小尺寸，别拖一下拖没了
      · 字号自适应复用 ClockFitter（写 --float-fill，与主时钟互不干扰）
 
    拖动 vs 点按的区分：位移超过 6px 视为拖动；否则 pointerup 视为点按。
+
+   ★★ 拖动为什么是自己搬窗口，而不是 startDragging / clientX ★★
+   1) Windows 上 startDragging（WM_NCLBUTTONDOWN + HTCAPTION）只对鼠标有效：
+      触摸流已经开始之后再发这条消息，系统不认，手指按着完全不动。
+      所以触摸必须自己算位移、自己 setPosition。
+   2) 位移必须用【屏幕坐标 screenX/Y】。clientX/Y 是相对窗口的，窗口一动
+      坐标系跟着动，下一帧位移就算错，形成反馈回路 —— 实测表现是抖、抽搐、
+      或者干脆"拖几下才挪一点"。
+   3) screenX/Y 的单位是 CSS 像素，而窗口位置 outerPosition() / setPosition()
+      是物理像素。Windows 显示缩放 125% / 150% / 200% 时两者差一个
+      devicePixelRatio —— 不乘这个系数，手指移 3 格窗口只移 2 格甚至更少，
+      正是"学校一体机上几乎拖不动"的原因。
+   4) 窗口位置是异步 IPC 取的。必须在 pointerdown 时就发起（而不是等越过
+      6px 阈值才问），否则 IPC 还没回来手指已经在动，这段位移全丢。
+   5) pointermove 可能一秒上百个，每个都发一次 setPosition 会把 IPC 队列堵住，
+      窗口一跳一跳追手指。用 rAF 合并成每帧一次。
    ========================================================================== */
 
 import { LogicalSize, PhysicalPosition, getCurrentWindow } from "@tauri-apps/api/window";
@@ -42,15 +57,25 @@ export class FloatWidget {
   private showSeconds = true;
   private cacheKey = "";
 
-  /** 拖动状态机：idle → pending(按下未动) → starting → native(系统拖动) / manual(手动 setPosition) */
-  private drag: "idle" | "pending" | "starting" | "native" | "manual" = "idle";
-  /** 触屏/触笔走手动拖动：系统原生 startDragging 在触摸流已经开始后才下发
-   *  WM_NCLBUTTONDOWN，Windows 不认 —— 实测触屏下原生拖动完全不生效。
-   *  鼠标保留原生（更跟手），触摸改用逐帧 setPosition 跟随。 */
-  private preferManual = false;
-  private manualReady = false;
-  private startPtr = { x: 0, y: 0 };
+  /** 拖动状态机：idle → pending(按下未动) → moving(逐帧搬窗口) */
+  private drag: "idle" | "pending" | "moving" = "idle";
+  /** 当前参与拖动的指针：多指（手掌误触）不重置状态、不参与拖动 */
+  private pointerId = -1;
+  /** 阈值判定用 client 坐标（CSS px；pending 阶段窗口还没动，坐标系没被污染） */
+  private startClient = { x: 0, y: 0 };
+  /** 手动拖动的锚点。screenXY = 屏幕 CSS 像素，参考系固定；
+   *  startWin = 窗口位置的物理像素。 */
+  private startScreen = { x: 0, y: 0 };
   private startWin = { x: 0, y: 0 };
+  /** devicePixelRatio：把 screenX/Y 的 CSS 像素位移换算成物理像素 */
+  private dpr = 1;
+  /** 窗口位置是否已经拿到（拿不到就不搬，避免从 (0,0) 起跳） */
+  private winReady = false;
+  /** 最近一次 pointermove 的屏幕坐标，rAF 里用它算目标位置 */
+  private latestScreen = { x: 0, y: 0 };
+  private dragRaf = 0;
+  /** 最近一次真正发出去的窗口位置：目标值没变就不再发 IPC */
+  private sentPos = { x: NaN, y: NaN };
 
   /** 缩放状态：起点指针 + 起点窗口逻辑尺寸；rAF 合并连续 setSize */
   private resizing = false;
@@ -135,49 +160,58 @@ export class FloatWidget {
     return !!t && !!t.closest(".float-actions, .float-handle");
   }
 
-  private beginNativeDrag(): void {
-    // 先占住状态再 await：否则 startDragging 返回前的每个 pointermove
-    // 都会再触发一次 beginDrag，等于疯狂重复调用系统拖动
-    this.drag = "starting";
-    getCurrentWindow()
-      .startDragging()
-      .then(() => {
-        if (this.drag === "starting") this.drag = "native";
-      })
-      .catch(() => {
-        // 非 Tauri 环境或原生拖动不可用：手动 setPosition 跟随
-        this.beginManualDrag();
-      });
-  }
-
-  /** 手动拖动：逐帧 setPosition 跟随指针。触屏固定走这条路（见 preferManual 注释）。
-   *  窗口当前位置是异步拿的，拿到之前忽略 move 事件 —— 否则起点是 (0,0)，
-   *  窗口会先跳到左上角再开始跟。 */
-  private beginManualDrag(): void {
-    this.drag = "manual";
-    this.manualReady = false;
+  /** pointerdown 时就问窗口在哪：等越过阈值再问的话，IPC 还没回、手指已在动，
+   *  这段时间的位移会整段丢掉（"拖好几下才动一点"的另一个来源）。 */
+  private primeWindowOrigin(): void {
+    this.winReady = false;
     getCurrentWindow()
       .outerPosition()
       .then((p) => {
+        if (this.drag === "idle") return; // 已经松手了，别用过期数据
         this.startWin = { x: p.x, y: p.y };
-        this.manualReady = true;
+        this.sentPos = { x: p.x, y: p.y }; // 窗口本来就在这，别先发一条"摆回起点"
+        this.winReady = true;
+        // 位置回来得比阈值晚：补一帧，别让手指已经走了一段而窗口还在原地
+        if (this.drag === "moving") this.scheduleMoveFrame();
       })
       .catch(() => {
-        this.drag = "idle"; // 连窗口位置都拿不到（浏览器预览），放弃拖动
+        this.winReady = false; // 纯浏览器预览没有窗口 API
       });
   }
 
-  private async manualDragTo(ev: PointerEvent): Promise<void> {
-    if (!this.manualReady) return;
-    const x = this.startWin.x + Math.round(ev.clientX - this.startPtr.x);
-    const y = this.startWin.y + Math.round(ev.clientY - this.startPtr.y);
-    // startWin 是物理像素，clientXY 是逻辑像素 —— 大多数单屏场景缩放一致，
-    // 跨不同 DPI 的显示器拖动会有细微偏差，可接受（拖完松手 onMoved 会存真实位置）。
-    try {
-      await getCurrentWindow().setPosition(new PhysicalPosition(x, y));
-    } catch {
-      /* 浏览器预览里没有窗口 API，忽略 */
+  /** 每帧最多一次 setPosition：pointermove 一秒上百个，逐个发会堵住 IPC 队列，
+   *  窗口就会一跳一跳地追手指。发出去不 await —— 等回来时下一帧又到了。 */
+  private scheduleMoveFrame(): void {
+    if (this.dragRaf) return;
+    this.dragRaf = requestAnimationFrame(() => {
+      this.dragRaf = 0;
+      if (this.drag !== "moving" || !this.winReady) return;
+      const scale = this.dpr > 0 && Number.isFinite(this.dpr) ? this.dpr : 1;
+      const dx = Math.round((this.latestScreen.x - this.startScreen.x) * scale);
+      const dy = Math.round((this.latestScreen.y - this.startScreen.y) * scale);
+      const x = this.startWin.x + dx;
+      const y = this.startWin.y + dy;
+      // 目标没变就别再发 IPC：一次拖动开头那帧位移是 0，没必要先把窗口
+      // "摆回起点"；手指按住不动时也不该每秒发几十条同样的命令。
+      if (x === this.sentPos.x && y === this.sentPos.y) return;
+      this.sentPos = { x, y };
+      getCurrentWindow()
+        .setPosition(new PhysicalPosition(x, y))
+        .catch(() => {
+          /* 浏览器预览里没有窗口 API，忽略 */
+        });
+    });
+  }
+
+  private finishDrag(): void {
+    if (this.dragRaf) {
+      cancelAnimationFrame(this.dragRaf);
+      this.dragRaf = 0;
     }
+    this.drag = "idle";
+    this.pointerId = -1;
+    this.winReady = false;
+    this.sentPos = { x: NaN, y: NaN };
   }
 
   /* ------------------------------------------------------------ 缩放（右下角手柄） */
@@ -221,16 +255,34 @@ export class FloatWidget {
     }
   }
 
+  private endResize(pointerId: number): void {
+    this.resizing = false;
+    this.pendingSize = null;
+    if (this.resizeRaf) {
+      cancelAnimationFrame(this.resizeRaf);
+      this.resizeRaf = 0;
+    }
+    try {
+      this.handleEl.releasePointerCapture(pointerId);
+    } catch {
+      /* 已释放 */
+    }
+  }
+
   /* ------------------------------------------------------------ 事件绑定 */
 
   wire(): void {
     // 卡片：点按切按钮排 / 拖动移窗口
     this.root.addEventListener("pointerdown", (ev) => {
       if (ev.button !== 0 || this.inInteractive(ev)) return;
+      if (this.drag !== "idle" || this.resizing) return; // 已有指针在拖/缩放：手掌误触不重置状态
       this.drag = "pending";
-      // 触屏/触笔不能用系统原生拖动（见 preferManual 注释），直接记下来
-      this.preferManual = ev.pointerType !== "mouse";
-      this.startPtr = { x: ev.clientX, y: ev.clientY };
+      this.pointerId = ev.pointerId;
+      this.startClient = { x: ev.clientX, y: ev.clientY };
+      this.startScreen = { x: ev.screenX, y: ev.screenY };
+      this.latestScreen = { x: ev.screenX, y: ev.screenY };
+      this.dpr = window.devicePixelRatio || 1;
+      this.primeWindowOrigin();
       try {
         this.root.setPointerCapture(ev.pointerId);
       } catch {
@@ -239,42 +291,63 @@ export class FloatWidget {
     });
 
     this.root.addEventListener("pointermove", (ev) => {
+      if (ev.pointerId !== this.pointerId) return; // 别的手指不算数
       if (this.drag === "pending") {
-        const d = Math.hypot(ev.clientX - this.startPtr.x, ev.clientY - this.startPtr.y);
-        if (d > TAP_SLOP) {
-          // 手动拖动的起点取"越过阈值那一刻"的指针位置，避免把阈值前的
-          // 那点位移也算进去导致窗口起步跳动
-          this.startPtr = { x: ev.clientX, y: ev.clientY };
-          if (this.preferManual) this.beginManualDrag();
-          else this.beginNativeDrag();
-        }
-      } else if (this.drag === "manual") {
-        void this.manualDragTo(ev);
+        const d = Math.hypot(ev.clientX - this.startClient.x, ev.clientY - this.startClient.y);
+        if (d <= TAP_SLOP) return;
+        // ★ 屏幕锚点取"越过阈值这一刻"的坐标：手指在阈值之前走的那点位移
+        //   不该算进去，否则窗口会先跳一下
+        this.startScreen = { x: ev.screenX, y: ev.screenY };
+        this.latestScreen = { x: ev.screenX, y: ev.screenY };
+        this.drag = "moving";
+        this.scheduleMoveFrame();
+        return;
       }
-      if (this.resizing) this.resizeTo(ev);
+      if (this.drag === "moving") {
+        this.latestScreen = { x: ev.screenX, y: ev.screenY };
+        this.scheduleMoveFrame();
+      }
     });
 
     const end = (ev: PointerEvent) => {
+      if (ev.pointerId !== this.pointerId) return;
       if (this.drag === "pending") this.toggleActions();
-      this.drag = "idle";
-      if (this.resizing) {
-        this.resizing = false;
-        this.pendingSize = null;
-        try {
-          this.handleEl.releasePointerCapture(ev.pointerId);
-        } catch {
-          /* 已释放 */
-        }
-      }
+      this.finishDrag();
     };
     this.root.addEventListener("pointerup", end);
     this.root.addEventListener("pointercancel", end);
 
-    // 右下角手柄：缩放
+    // 兜底：指针在窗口外松开、或者系统把 capture 收走时，root 可能收不到
+    // pointerup。不补这条，状态机会永远停在 moving，卡片再也点不动。
+    window.addEventListener("pointerup", (ev) => {
+      if (this.drag !== "idle" && ev.pointerId === this.pointerId) this.finishDrag();
+    });
+    window.addEventListener("pointercancel", (ev) => {
+      if (this.drag !== "idle" && ev.pointerId === this.pointerId) this.finishDrag();
+    });
+    window.addEventListener("blur", () => this.finishDrag());
+
+    // 右下角手柄：缩放。独立监听（不走拖动状态机）—— 手柄自己 capture，
+    // 收缩放的指针和拖动/点按的指针互不干扰。
     this.handleEl.addEventListener("pointerdown", (ev) => {
       if (ev.button !== 0) return;
       ev.stopPropagation();
+      const pid = ev.pointerId;
       void this.beginResize(ev);
+
+      const move = (e: PointerEvent): void => {
+        if (e.pointerId === pid && this.resizing) this.resizeTo(e);
+      };
+      const up = (e: PointerEvent): void => {
+        if (e.pointerId !== pid) return;
+        this.handleEl.removeEventListener("pointermove", move);
+        this.handleEl.removeEventListener("pointerup", up);
+        this.handleEl.removeEventListener("pointercancel", up);
+        this.endResize(pid);
+      };
+      this.handleEl.addEventListener("pointermove", move);
+      this.handleEl.addEventListener("pointerup", up);
+      this.handleEl.addEventListener("pointercancel", up);
     });
 
     // 按钮排（行为由 main.ts 通过 setButtonHandler 注入）
