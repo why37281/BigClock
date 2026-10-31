@@ -35,14 +35,14 @@ const dom = {
   status: $("settings-status"),
   periods: $("periods"),
   periodsSummary: $("periods-summary"),
-  dirty: $("dirty-hint"),
+  saveNote: $("save-note"),
+  timeOffsetNote: $("timeoffset-live"),
   cfgPath: $("cfg-path"),
   toast: $("toast"),
   cornerNote: $("corner-note"),
   btnAddPeriod: $("btn-add-period"),
-  btnSave: $("btn-save") as HTMLButtonElement,
   btnClose: $("btn-close"),
-  btnRevert: $("btn-revert"),
+  btnRestore: $("btn-restore-defaults"),
   btnOpenFile: $("btn-open-file"),
   btnReload: $("btn-reload"),
   btnSettings: $("btn-settings"),
@@ -101,6 +101,10 @@ let lastAppliedKey = "";
 const renderer = new Renderer();
 const fitter = new ClockFitter(renderer.viewEl, renderer.clockEl, renderer.headerEl);
 const floaty = new FloatWidget(document);
+/** 整分对齐时钟：改偏移量之后要让它重新对齐到"展示时间"的下一个整分 */
+let clockRef: MinuteClock | null = null;
+/** 上一次生效的偏移量（秒），用来判断要不要重新对齐 */
+let lastOffset = 0;
 const crop = new CropController(document, {
   getLeft: () => cfg.crop_left,
   getRight: () => cfg.crop_right,
@@ -216,6 +220,7 @@ function paintClock(now: Date): void {
 function tickFast(): void {
   const now = nowDate();
   paintClock(now);
+  if (isOpen()) updateTimeOffsetNote();
   if (segments.length) {
     const res = applyNow(segments, nowMinutes(now));
     const weights = growWeights(segments, nowIndex);
@@ -303,17 +308,36 @@ function setCornerNote(msg: string | null): void {
   dom.cornerNote.hidden = !msg;
 }
 
-/* ================================================================== 设置面板 */
+/* ================================================================== 设置面板
+   ★ 设置是【即时保存】的：改一个控件就立刻预览，350ms 后写盘。
+     没有"保存 / 放弃修改"按钮，也没有"设置还没保存，确定关闭吗"的弹窗。
+     以前那套草稿机制还有一个隐蔽的副作用：关面板时草稿留在 cfg 里、文件里
+     还是旧值，看起来就是"时间偏移改了却没生效"。
+   ★ 唯一保留确认框的是底部的「恢复默认配置」—— 它会丢掉用户自己写的作息表。 */
 
-let editing: Config | null = null;
+/** 当前编辑中的时段草稿（只服务行 DOM；权威数据始终是 cfg） */
 let periodsDraft: Period[] = [];
 let issuesByIndex = new Map<number, string>();
+/** 即时保存的防抖定时器 */
+let saveTimer = 0;
+/** 是否有还没写盘的改动 */
+let unsaved = false;
+/** 最近一次成功写盘的配置：校验失败/写盘失败后关面板时用它把显示回滚回去 */
+let lastSaved: Config | null = null;
+/** 最近一次写盘失败的原因（成功后清空）。关面板时据此决定要不要回滚显示 */
+let lastSaveError = "";
+/** 最近一次写盘时间：轮询要避开自己刚写的那一拍 */
+let lastWriteAt = 0;
+/** 打开设置时的窗口形态：面板关掉后才真正应用（否则选浮窗会把面板一起缩小） */
+let modeAtOpen: Config["mode"] = "fullscreen";
+/** 正在关闭（关闭流程里有 await，防止连点/连按重复执行） */
+let closing = false;
 
 function isOpen(): boolean {
   return !dom.settings.hidden;
 }
 
-/** editing/cfg 当前生效的方案（按 active_plan 匹配，失配退回第一个） */
+/** cfg 当前生效的方案（按 active_plan 匹配，失配退回第一个） */
 function activePlanOf(c: Config): Plan {
   return c.plans.find((p) => p.name === c.active_plan) ?? c.plans[0];
 }
@@ -344,13 +368,17 @@ function fillPlanSelect(c: Config): void {
 
 function openSettings(): void {
   if (isOpen()) return;
-  editing = cloneConfig(cfg);
-  periodsDraft = activePlanOf(editing).periods.map((p) => ({ ...p }));
-  fillForm(editing);
+  modeAtOpen = cfg.mode;
+  periodsDraft = activePlanOf(cfg).periods.map((p) => ({ ...p }));
+  issuesByIndex.clear();
   dom.settings.hidden = false;
   document.body.classList.add("settings-open");
+  fillForm(cfg);
   renderPeriodRows();
-  markDirty(false);
+  setSaveNote(
+    HAS_BACKEND ? "改动会即时保存" : "浏览器预览模式：改动不会写进文件",
+    !HAS_BACKEND,
+  );
   dom.status.textContent = !HAS_BACKEND
     ? "浏览器预览模式：配置读写不可用，改动只在本次预览里生效"
     : cfgPath
@@ -358,15 +386,58 @@ function openSettings(): void {
       : "未能确定配置文件路径";
 }
 
-function closeSettings(force = false): void {
-  if (!isOpen()) return;
-  if (!force && isDirty()) {
-    if (!confirm("设置还没保存，确定关闭吗？")) return;
+/**
+ * 关闭设置。
+ * ★ 这里【不再】问"设置还没保存，确定关闭吗"：设置是即时保存的，
+ *   关掉时最多只有一个 350ms 的防抖窗口，先把这次写完再关就行。
+ * ★ 如果草稿里有校验不过的内容（根本写不进文件），关掉时把显示回滚到
+ *   文件里的有效配置 —— 否则界面会一直显示一份"文件里并不存在"的配置。
+ */
+async function closeSettings(): Promise<void> {
+  if (!isOpen() || closing) return;
+  closing = true;
+  try {
+    await closeSettingsNow();
+  } finally {
+    closing = false;
   }
+}
+
+async function closeSettingsNow(): Promise<void> {
+  clearTimeout(saveTimer);
+  saveTimer = 0;
+  if (unsaved && !hasDraftIssues()) await commitSettings();
+
+  // 校验不过或写盘失败（文件里没有这份配置）：把显示回滚到文件里的有效配置，
+  // 否则界面会一直显示一份"文件里并不存在"的配置 —— 正是"时间偏移改了却没生效"的成因。
+  if ((hasDraftIssues() || lastSaveError !== "") && lastSaved) {
+    const issues = validatePeriods(periodsDraft).length;
+    cfg = cloneConfig(lastSaved);
+    lastOffset = cfg.time_offset;
+    repaint(true);
+    void refitAfterLayout();
+    clockRef?.resync();
+    if (issues) toast(`有 ${issues} 处问题没改好，已恢复成文件里的配置`, true);
+    else if (lastSaveError) toast("刚才的改动没能写进文件，已恢复成文件里的配置", true);
+  }
+
   dom.settings.hidden = true;
   document.body.classList.remove("settings-open");
-  editing = null;
   issuesByIndex.clear();
+  unsaved = false;
+  lastSaveError = "";
+
+  // 「显示模式」在面板里改了：等面板关掉之后再动窗口，
+  // 不然选「浮窗」会把设置面板一起缩成 640×260。
+  if (cfg.mode !== modeAtOpen) {
+    await applyWindowMode(cfg);
+    await refitAfterLayout();
+  }
+}
+
+/** 草稿是否写不进文件（有校验问题或一段都没有） */
+function hasDraftIssues(): boolean {
+  return periodsDraft.length === 0 || validatePeriods(periodsDraft).length > 0;
 }
 
 function fillForm(c: Config): void {
@@ -386,6 +457,7 @@ function fillForm(c: Config): void {
   dom.f.barGap.value = String(c.bar.gap_minutes);
   void fillScreens(c.screen);
   dom.cfgPath.textContent = cfgPath || "（未确定）";
+  updateTimeOffsetNote();
 }
 
 /**
@@ -420,35 +492,57 @@ async function fillScreens(current: number): Promise<void> {
   dom.f.screen.value = String(Math.min(current, list.length - 1));
 }
 
-/** 表单 → editing（每次控件变动都调用） */
+/** 表单 → cfg（每次控件变动都调用）。cfg 是唯一权威状态，不再有第二份草稿。 */
 function readForm(): void {
-  if (!editing) return;
-  editing.theme = dom.f.theme.value as Config["theme"];
-  editing.contrast = dom.f.contrast.value as Config["contrast"];
-  editing.tint = dom.f.tint.value as Config["tint"];
-  editing.mode = dom.f.mode.value as Config["mode"];
-  editing.screen = Number(dom.f.screen.value) || 0;
-  editing.clock_format = dom.f.clockFormat.value as Config["clock_format"];
-  editing.title = dom.f.title.value;
+  cfg.theme = dom.f.theme.value as Config["theme"];
+  cfg.contrast = dom.f.contrast.value as Config["contrast"];
+  cfg.tint = dom.f.tint.value as Config["tint"];
+  cfg.mode = dom.f.mode.value as Config["mode"];
+  cfg.screen = Number(dom.f.screen.value) || 0;
+  cfg.clock_format = dom.f.clockFormat.value as Config["clock_format"];
+  cfg.title = dom.f.title.value;
   // 时间偏移：空串当 0；非数字 Number() 得 NaN → || 0 兜底；允许负数和超过 60 的值
-  editing.time_offset = Math.round(Number(dom.f.timeOffset.value) || 0);
-  editing.active_plan = dom.f.plan.value || activePlanOf(editing).name;
-  editing.bar.enabled = dom.f.barEnabled.value === "true";
-  editing.bar.show_names = dom.f.barNames.value === "true";
-  editing.bar.gap_minutes = dom.f.barGap.value === "true";
+  cfg.time_offset = Math.round(Number(dom.f.timeOffset.value) || 0);
+  cfg.active_plan = dom.f.plan.value || activePlanOf(cfg).name;
+  cfg.bar.enabled = dom.f.barEnabled.value === "true";
+  cfg.bar.show_names = dom.f.barNames.value === "true";
+  cfg.bar.gap_minutes = dom.f.barGap.value === "true";
   // 当前方案的时段草稿写回所属方案（其它方案不动）
-  activePlanOf(editing).periods = periodsDraft.map((p) => ({ ...p }));
+  activePlanOf(cfg).periods = periodsDraft.map((p) => ({ ...p }));
 }
 
-function isDirty(): boolean {
-  if (!editing) return false;
-  readForm();
-  return JSON.stringify(editing) !== JSON.stringify(cfg);
+/** 主题/对比度/底色这几个控件的可用性跟着主题走 */
+function syncFieldAvailability(): void {
+  dom.f.contrast.disabled = cfg.theme !== "dark";
+  dom.f.tint.disabled = !TINT_THEMES.has(cfg.theme);
 }
 
-function markDirty(dirty: boolean): void {
-  dom.btnSave.disabled = !dirty;
-  dom.dirty.textContent = dirty ? "有未保存的修改" : "已是最新";
+/** 保存状态提示（底部那行小字） */
+function setSaveNote(msg: string, isErr = false): void {
+  dom.saveNote.textContent = msg;
+  dom.saveNote.classList.toggle("err", isErr);
+}
+
+/** "19:29:53"（自检/校准用） */
+function hhmmss(d: Date): string {
+  return `${hhmm(d)}:${ss(d)}`;
+}
+
+/**
+ * 时间偏移那一栏下方的实时读数：
+ * 左边是界面正在显示的时间（已加偏移），右边是电脑自己的时间。
+ * 学校挂钟不准时，拿这两个数一对就知道该填多少 —— 也能直接看出
+ * "填了 +8 到底生效没有"。设置面板开着时每秒刷新。
+ */
+function updateTimeOffsetNote(): void {
+  if (!dom.timeOffsetNote) return;
+  if (!isOpen()) return;
+  const shown = nowDate();
+  const sys = new Date();
+  const off = cfg.time_offset;
+  const sign = off > 0 ? "+" : "";
+  dom.timeOffsetNote.textContent =
+    `当前显示 ${hhmmss(shown)} · 电脑时间 ${hhmmss(sys)}（偏移 ${sign}${off} 秒）`;
 }
 
 /* ---------------------------------------------------------- 作息表编辑行 */
@@ -473,7 +567,7 @@ function renderPeriodRows(): void {
     name.maxLength = 20;
     name.addEventListener("input", () => {
       periodsDraft[i].name = name.value;
-      refreshDraft();
+      onFormChanged();
     });
 
     const start = document.createElement("input");
@@ -481,7 +575,7 @@ function renderPeriodRows(): void {
     start.value = toTimeInput(p.start);
     start.addEventListener("input", () => {
       periodsDraft[i].start = start.value || p.start;
-      refreshDraft();
+      onFormChanged();
     });
 
     const dash = document.createElement("span");
@@ -493,7 +587,7 @@ function renderPeriodRows(): void {
     end.value = toTimeInput(p.end);
     end.addEventListener("input", () => {
       periodsDraft[i].end = end.value || p.end;
-      refreshDraft();
+      onFormChanged();
     });
 
     const dur = document.createElement("span");
@@ -509,7 +603,7 @@ function renderPeriodRows(): void {
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>';
     del.addEventListener("click", () => {
       periodsDraft.splice(i, 1);
-      refreshDraft();
+      onFormChanged();
       renderPeriodRows();
     });
 
@@ -542,27 +636,153 @@ function toTimeInput(v: string): string {
   return n === "24:00" ? "23:59" : n;
 }
 
-/** 草稿变了：重算校验 + 立刻预览到界面上 */
-function refreshDraft(): void {
+/** 草稿变了：重算校验 + 立刻预览到界面上 + 防抖写盘（即时保存） */
+function onFormChanged(): void {
   readForm();
-  // 主题变了，对比度/底色的可用性跟着变（只有暗色基础主题有这两个档位）
-  if (editing) {
-    dom.f.contrast.disabled = editing.theme !== "dark";
-    dom.f.tint.disabled = !TINT_THEMES.has(editing.theme);
-  }
+  syncFieldAvailability();
   const issues = validatePeriods(periodsDraft);
   issuesByIndex = new Map(issues.map((x) => [x.index, x.message]));
 
-  // 立刻预览：把草稿套用到展示层，所见即所得
-  // （readForm 已把 periodsDraft 写进 editing 的当前方案，clone 即包含）
-  if (editing) {
-    cfg = cloneConfig(editing);
-    repaint(true);
-    void refitAfterLayout();
+  // 立刻预览：所见即所得（cfg 是唯一状态，readForm 已经把它改成最新）
+  repaint(true);
+  void refitAfterLayout();
+
+  unsaved = true;
+  scheduleSave();
+  void refreshRowErrors();
+  updateTimeOffsetNote();
+
+  // 偏移量改了：整分对齐时钟是按【展示时间】对齐的，必须让它重新算下一次
+  // 整分边界；否则新偏移要等到下一个系统整分才会被"整分"事件认到。
+  if (cfg.time_offset !== lastOffset) {
+    lastOffset = cfg.time_offset;
+    clockRef?.resync();
+  }
+}
+
+/** 350ms 防抖：连续敲键盘时只在停下来之后写一次文件 */
+function scheduleSave(): void {
+  if (!HAS_BACKEND) return;
+  clearTimeout(saveTimer);
+  saveTimer = window.setTimeout(() => {
+    saveTimer = 0;
+    void commitSettings();
+  }, 350);
+}
+
+/**
+ * 把当前 cfg 写回配置文件（即时保存的执行体）。
+ * 校验不过就【不写】—— 文件里保留上一份有效配置，界面上照常显示草稿，
+ * 底部提示改成"有 N 处问题，暂未保存"。改好之后下一次自动保存会写进去。
+ *
+ * 连续改多个控件时可能同时有几次保存排着队，这里用一条 Promise 链串起来：
+ * 后一次执行时会读到最新的 cfg，不会出现两份内容交叉写同一个文件。
+ */
+let saveQueued = false;
+let saveChain: Promise<void> = Promise.resolve();
+
+function commitSettings(): Promise<void> {
+  clearTimeout(saveTimer);
+  saveTimer = 0;
+  if (saveQueued) return saveChain; // 已排队；它执行时读到的就是最新 cfg
+  saveQueued = true;
+  saveChain = saveChain
+    .then(async () => {
+      saveQueued = false;
+      await writeSettingsNow();
+    })
+    .catch(() => {
+      saveQueued = false;
+    });
+  return saveChain;
+}
+
+async function writeSettingsNow(): Promise<void> {
+  if (!HAS_BACKEND) {
+    unsaved = false;
+    setSaveNote("浏览器预览模式：改动不会写进文件", true);
+    return;
   }
 
-  markDirty(true);
-  void refreshRowErrors();
+  const issues = validatePeriods(periodsDraft);
+  if (issues.length) {
+    setSaveNote(`有 ${issues.length} 处问题，暂未保存（改好就自动保存）`, true);
+    return;
+  }
+  if (!periodsDraft.length) {
+    setSaveNote("至少留一个时段，暂未保存", true);
+    return;
+  }
+
+  // 归一化当前方案的时段（其它方案原样提交，后端会各自校验）
+  const payload: Config = cloneConfig(cfg);
+  activePlanOf(payload).periods = periodsDraft.map((p) => ({
+    name: p.name.trim(),
+    start: normalizeTime(p.start) ?? p.start,
+    end: normalizeTime(p.end) ?? p.end,
+  }));
+
+  setSaveNote("正在保存…");
+  // 写盘开始就记账：轮询要避开"正在写 / 刚写完"的这一拍，
+  // 否则可能读到半截文件，被误判成"配置文件格式有误"。
+  lastWriteAt = Date.now();
+  try {
+    const res = await invoke<ConfigEnvelope>("save_config", { config: payload });
+    lastRaw = res.raw ?? lastRaw;
+    lastWriteAt = Date.now();
+    unsaved = false;
+    lastSaveError = "";
+    // 后端归一化后的配置才是权威值（主题槽位、方案重名、时间写法…）
+    cfg = res.config;
+    lastSaved = cloneConfig(res.config);
+    const warns = res.warnings ?? [];
+    setCornerNote(warns.length ? warns.join("\n") : null);
+    setSaveNote(`已保存 · ${hhmmss(nowDate())}`);
+    repaint(true);
+    void refitAfterLayout();
+  } catch (e) {
+    lastSaveError = backendErr(e);
+    setSaveNote(`保存失败：${lastSaveError}`, true);
+    toast(lastSaveError, true);
+  }
+}
+
+/**
+ * 恢复默认配置（底部按钮）。
+ * ★ 会丢掉用户自己写的作息方案，所以这里保留确认框；
+ *   显示形态（模式 / 半屏 / 边界 / 浮窗几何）保持不动 —— 那不是"配置内容"，
+ *   而且把窗口一起改掉会让人莫名其妙。
+ */
+function restoreDefaults(): void {
+  const ok = confirm(
+    "确定恢复默认配置吗？\n\n" +
+      "作息方案、主题、标题、时间偏移等都会回到出厂默认值，\n" +
+      "你自己添加的方案和时段会被删掉，此操作不可撤销。\n\n" +
+      "（显示模式、半屏状态和浮窗位置保持不变）",
+  );
+  if (!ok) return;
+
+  const keep = {
+    mode: cfg.mode,
+    half: cfg.half,
+    screen: cfg.screen,
+    crop_left: cfg.crop_left,
+    crop_right: cfg.crop_right,
+    float_w: cfg.float_w,
+    float_h: cfg.float_h,
+    float_x: cfg.float_x,
+    float_y: cfg.float_y,
+  };
+  cfg = { ...defaultConfig(), ...keep };
+  periodsDraft = activePlanOf(cfg).periods.map((p) => ({ ...p }));
+  issuesByIndex.clear();
+  fillForm(cfg);
+  renderPeriodRows();
+  repaint(true);
+  void refitAfterLayout();
+  unsaved = true;
+  void commitSettings();
+  toast("已恢复默认配置");
 }
 
 async function refreshRowErrors(): Promise<void> {
@@ -594,59 +814,6 @@ async function refreshRowErrors(): Promise<void> {
   });
 }
 
-/* ---------------------------------------------------------- 保存 / 放弃 */
-
-async function saveSettings(): Promise<void> {
-  if (!editing) return;
-  readForm();
-
-  const issues = validatePeriods(periodsDraft);
-  if (issues.length) {
-    issuesByIndex = new Map(issues.map((x) => [x.index, x.message]));
-    await refreshRowErrors();
-    toast(`当前方案有 ${issues.length} 处问题，先改好再保存`, true);
-    return;
-  }
-  if (!periodsDraft.length) {
-    toast("至少留一个时段", true);
-    return;
-  }
-
-  // 归一化当前方案的时段（其它方案原样提交，后端会各自校验）
-  const payload: Config = cloneConfig(editing);
-  activePlanOf(payload).periods = periodsDraft.map((p) => ({
-    name: p.name.trim(),
-    start: normalizeTime(p.start) ?? p.start,
-    end: normalizeTime(p.end) ?? p.end,
-  }));
-
-  dom.btnSave.disabled = true;
-  try {
-    const res = await invoke<ConfigEnvelope>("save_config", { config: payload });
-    applyEnvelope(res, false);
-    toast("已保存到配置文件");
-    markDirty(false);
-    dom.settings.hidden = true;
-    document.body.classList.remove("settings-open");
-    editing = null;
-    await refitAfterLayout();
-  } catch (e) {
-    toast(backendErr(e), true);
-    dom.btnSave.disabled = false;
-  }
-}
-
-function revertSettings(): void {
-  editing = cloneConfig(cfg);
-  periodsDraft = activePlanOf(editing).periods.map((p) => ({ ...p }));
-  issuesByIndex.clear();
-  fillForm(editing);
-  renderPeriodRows();
-  repaint(true);
-  markDirty(false);
-  void refitAfterLayout();
-}
-
 /* ================================================================== 配置来源 */
 
 /** 记住最近一次见到的文件原文，用来判断"文件是不是被别人改了" */
@@ -656,12 +823,20 @@ function applyEnvelope(env: ConfigEnvelope, syncForm: boolean): void {
   cfg = env.config;
   cfgPath = env.path;
   lastRaw = env.raw ?? "";
+  lastSaved = cloneConfig(env.config);
+  lastOffset = env.config.time_offset;
+  unsaved = false;
+  lastSaveError = "";
 
   const warns = env.warnings ?? [];
   setCornerNote(warns.length ? warns.join("\n") : null);
 
   dom.cfgPath.textContent = cfgPath || "（未确定）";
-  if (syncForm && isOpen()) fillForm(cfg);
+  if (syncForm && isOpen()) {
+    periodsDraft = activePlanOf(cfg).periods.map((p) => ({ ...p }));
+    fillForm(cfg);
+    renderPeriodRows();
+  }
 
   repaint(true);
   void refitAfterLayout();
@@ -682,6 +857,9 @@ async function pollConfigOnce(): Promise<void> {
   // 轮询必然每秒失败一次 —— 别把 TypeError 常驻在角落里，静默跳过。
   if (!HAS_BACKEND) return;
   if (document.hidden || polling) return;
+  // 刚写完盘的那一拍别读：read 可能发生在 write 与"记下自己写的原文"之间，
+  // 否则会把自己写的内容误判成"外部修改"，白弹一次提示。
+  if (Date.now() - lastWriteAt < 1500) return;
   polling = true;
   try {
     const res = await invoke<{ raw: string }>("raw_config");
@@ -879,13 +1057,14 @@ async function handleKey(e: KeyboardEvent): Promise<void> {
     e.preventDefault();
     // 浮窗里打开设置：先回到窗口模式（设置面板需要一个正常窗口装下）
     if (!isOpen() && cfg.mode === "float") await switchMode("window");
-    isOpen() ? closeSettings() : openSettings();
+    if (isOpen()) void closeSettings();
+    else openSettings();
     return;
   }
   if (e.key === "Escape") {
     if (isOpen()) {
       e.preventDefault();
-      closeSettings();
+      void closeSettings();
     } else if (cfg.mode === "fullscreen") {
       e.preventDefault();
       await switchMode("window");
@@ -960,11 +1139,17 @@ async function switchMode(mode: Config["mode"]): Promise<void> {
   await persist();
 }
 
-/** 存盘。失败不影响当前显示，用户下次改还会再存一次。 */
+/** 存盘（切主题 / 半屏 / 形态 / 边界 / 浮窗几何这类"一改就落盘"的动作）。
+ *  失败不影响当前显示，用户下次改还会再存一次。 */
 async function persist(): Promise<void> {
+  lastWriteAt = Date.now(); // 写之前就记账，轮询别在写入中途读文件
   try {
     const res = await invoke<ConfigEnvelope>("save_config", { config: cfg });
     lastRaw = res.raw ?? lastRaw;   // 记下自己写的这份，轮询才不会自激
+    lastWriteAt = Date.now();
+    lastSaved = cloneConfig(res.config);
+    // 只采信后端归一化后的主题槽位之类的附带修正，窗口几何以本地为准
+    // （拖动过程中 persist 可能比 setPosition 的回传还早到，别让旧值把新位置盖回去）
   } catch (e) {
     console.warn("保存配置失败：", e);
   }
@@ -1040,9 +1225,8 @@ function wireSettingsUI(): void {
   // ---- 控制条：退出程序 ----
   dom.btnQuit.addEventListener("click", quitApp);
 
-  dom.btnClose.addEventListener("click", () => closeSettings());
-  dom.btnRevert.addEventListener("click", revertSettings);
-  dom.btnSave.addEventListener("click", () => void saveSettings());
+  dom.btnClose.addEventListener("click", () => void closeSettings());
+  dom.btnRestore.addEventListener("click", restoreDefaults);
   dom.btnAddPeriod.addEventListener("click", () => {
     readForm();
     // 新段默认接在最后一段结束时刻之后，省得用户手填
@@ -1053,7 +1237,7 @@ function wireSettingsUI(): void {
     const end = `${String(Math.floor(endMin / 60)).padStart(2, "0")}:${String(endMin % 60).padStart(2, "0")}`;
     periodsDraft.push({ name: "", start, end });
     renderPeriodRows();
-    refreshDraft();
+    onFormChanged();
     const inputs = dom.periods.querySelectorAll<HTMLInputElement>(".period-row input[type=text]");
     inputs[inputs.length - 1]?.focus();
   });
@@ -1066,13 +1250,6 @@ function wireSettingsUI(): void {
       try {
         const env = await invoke<ConfigEnvelope>("reload_config");
         applyEnvelope(env, true);
-        if (isOpen()) {
-          editing = cloneConfig(cfg);
-          periodsDraft = activePlanOf(editing).periods.map((p) => ({ ...p }));
-          fillForm(editing);
-          renderPeriodRows();
-          markDirty(false);
-        }
         toast("已重新读取配置文件");
       } catch (e) {
         toast(backendErr(e), true);
@@ -1085,8 +1262,8 @@ function wireSettingsUI(): void {
     "clockFormat", "title", "timeOffset", "barEnabled", "barNames", "barGap",
   ];
   for (const k of fields) {
-    dom.f[k].addEventListener("change", () => refreshDraft());
-    dom.f[k].addEventListener("input", () => refreshDraft());
+    dom.f[k].addEventListener("change", onFormChanged);
+    dom.f[k].addEventListener("input", onFormChanged);
   }
 
   // ---- 作息方案：切换 / 改名 / 另存新方案 / 删除 ----
@@ -1094,65 +1271,62 @@ function wireSettingsUI(): void {
   // 当前草稿存回【旧】方案再切换；直接 readForm 会把旧草稿写进新方案，
   // 表现就是"在这套方案里改的时段跑到另一套里去了"。
   dom.f.plan.addEventListener("change", () => {
-    if (!editing) return;
-    const activeName = editing.active_plan; // 闭包里 editing 的空值窄化会丢，先取出来
-    const prev = editing.plans.find((p) => p.name === activeName) ?? editing.plans[0];
+    const activeName = cfg.active_plan; // 闭包里的窄化会丢，先取出来
+    const prev = cfg.plans.find((p) => p.name === activeName) ?? cfg.plans[0];
     prev.periods = periodsDraft.map((p) => ({ ...p }));
-    editing.active_plan = dom.f.plan.value || activeName;
-    periodsDraft = activePlanOf(editing).periods.map((p) => ({ ...p }));
-    dom.f.planName.value = activePlanOf(editing).name;
+    cfg.active_plan = dom.f.plan.value || activeName;
+    periodsDraft = activePlanOf(cfg).periods.map((p) => ({ ...p }));
+    dom.f.planName.value = activePlanOf(cfg).name;
     issuesByIndex.clear();
     renderPeriodRows();
-    refreshDraft(); // 里面的 readForm 把（新方案的）草稿写回新方案，等于空写
+    onFormChanged(); // 里面的 readForm 把（新方案的）草稿写回新方案，等于空写
   });
 
   // 改名：同步方案名与 active_plan（下拉按名字索引，必须唯一，重名自动加序号）
   dom.f.planName.addEventListener("input", () => {
-    if (!editing) return;
     const raw = dom.f.planName.value.trim();
     if (!raw) return;
-    const plan = activePlanOf(editing);
+    const plan = activePlanOf(cfg);
     const oldName = plan.name;
-    const others = editing.plans.filter((p) => p !== plan);
-    const name = uniquePlanName({ ...editing, plans: others }, raw);
+    const others = cfg.plans.filter((p) => p !== plan);
+    const name = uniquePlanName({ ...cfg, plans: others }, raw);
     plan.name = name;
-    if (editing.active_plan === oldName) editing.active_plan = name;
-    fillPlanSelect(editing);
-    refreshDraft();
+    if (cfg.active_plan === oldName) cfg.active_plan = name;
+    fillPlanSelect(cfg);
+    onFormChanged();
   });
 
   // 另存新方案：以当前时段草稿为底稿复制一套（上午/晚上常常只是微调）
   dom.btnPlanAdd.addEventListener("click", () => {
-    if (!editing) return;
     readForm();
-    const name = uniquePlanName(editing, "新方案");
-    editing.plans.push({ name, periods: periodsDraft.map((p) => ({ ...p })) });
-    editing.active_plan = name;
-    fillPlanSelect(editing);
+    const name = uniquePlanName(cfg, "新方案");
+    cfg.plans.push({ name, periods: periodsDraft.map((p) => ({ ...p })) });
+    cfg.active_plan = name;
+    fillPlanSelect(cfg);
     dom.f.planName.value = name;
-    refreshDraft();
+    onFormChanged();
     dom.f.planName.focus();
     dom.f.planName.select();
   });
 
   // 删除当前方案（只剩一套时按钮是禁用的）
   dom.btnPlanDel.addEventListener("click", () => {
-    if (!editing || editing.plans.length <= 1) return;
+    if (cfg.plans.length <= 1) return;
     readForm();
-    const delName = editing.active_plan; // 闭包里 editing 的空值窄化会丢，先取出来
-    editing.plans = editing.plans.filter((p) => p.name !== delName);
-    editing.active_plan = editing.plans[0].name;
-    periodsDraft = activePlanOf(editing).periods.map((p) => ({ ...p }));
-    fillPlanSelect(editing);
-    dom.f.planName.value = activePlanOf(editing).name;
+    const delName = cfg.active_plan; // 闭包里的窄化会丢，先取出来
+    cfg.plans = cfg.plans.filter((p) => p.name !== delName);
+    cfg.active_plan = cfg.plans[0].name;
+    periodsDraft = activePlanOf(cfg).periods.map((p) => ({ ...p }));
+    fillPlanSelect(cfg);
+    dom.f.planName.value = activePlanOf(cfg).name;
     issuesByIndex.clear();
     renderPeriodRows();
-    refreshDraft();
+    onFormChanged();
   });
 
   // 点遮罩关闭
   dom.settings.addEventListener("mousedown", (e) => {
-    if (e.target === dom.settings) closeSettings();
+    if (e.target === dom.settings) void closeSettings();
   });
 }
 
@@ -1167,15 +1341,21 @@ async function main(): Promise<void> {
   void refitAfterLayout();
   markSelfcheck("ready", cfg.mode);
 
-  // 整分对齐时钟；心跳只负责秒数与进度填充
-  const clock = new MinuteClock({
-    onMinute: () => {
-      lastAppliedKey = "";
-      repaint();
-      scheduleFit();
+  // 整分对齐时钟；心跳只负责秒数与进度填充。
+  // ★ 传入的"当前时间"是【展示时间】（系统时间 + time_offset）——
+  //   这样整分事件落在展示时间的分钟边界上，偏移量不是 60 的整数倍时也不会错位。
+  const clock = new MinuteClock(
+    {
+      onMinute: () => {
+        lastAppliedKey = "";
+        repaint();
+        scheduleFit();
+      },
+      onTick: tickFast,
     },
-    onTick: tickFast,
-  });
+    () => nowDate().getTime(),
+  );
+  clockRef = clock;
   clock.start();
 
   // 休眠唤醒 / 切回前台：立刻重算、重新对齐分钟边界，并补一次配置轮询

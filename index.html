@@ -41,9 +41,10 @@
 </div>
 
 <!-- 控制条：照搬 design-preview.html 的 #devbar（半透明黑底 + 圆角 + blur）。
-     平时隐形，鼠标移到左下角才浮现，不挡大屏。
-     刻意只留三项：主题 / 显示模式 / 设置入口。
-     对比度、底色这类"调一次就不动"的放进了设置面板。 -->
+     除了浮窗模式以外【始终显示】—— 之前是"鼠标移到页面才浮现"，在大屏/触屏上
+     经常找不到入口，改成常驻（半透明，不挡内容）。
+     按钮顺序：主题 / 显示模式 / 浮窗 · 设置 · 全屏·退出全屏 + 退出程序
+     （两个"退出"挨在一起，误触也能一眼看到是哪个）。 -->
 <div id="devbar">
   <!-- 主题：亮 / 暗 -->
   <button id="btn-theme" title="亮 / 暗" aria-label="切换主题">
@@ -61,22 +62,6 @@
       <g class="modefill">
         <rect class="st" x="4.2" y="6.2" width="15.6" height="11.6" rx="1.4"/>
       </g>
-    </svg>
-  </button>
-  <div class="sep"></div>
-
-  <!-- 全屏 / 退出全屏：两个按钮同一时间只显示一个（由 JS 按当前状态切换），
-       效果和 F11 完全一样。分开做成两个按钮，是为了不用记"这个键现在是进还是退"。 -->
-  <button id="btn-enter-fs" title="全屏（F11）" aria-label="全屏">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-         stroke-linecap="round" stroke-linejoin="round">
-      <path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"/>
-    </svg>
-  </button>
-  <button id="btn-exit-fs" title="退出全屏（F11）" aria-label="退出全屏" hidden>
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-         stroke-linecap="round" stroke-linejoin="round">
-      <path d="M4 9h5V4M20 9h-5V4M4 15h5v5M20 15h-5v5"/>
     </svg>
   </button>
 
@@ -100,6 +85,21 @@
   </button>
   <div class="sep"></div>
 
+  <!-- 全屏 / 退出全屏：两个按钮同一时间只显示一个（由 JS 按当前状态切换），
+       效果和 F11 完全一样。和「退出程序」挨在一起：两个"退出"在同一组里，
+       不会一点就把程序关了。 -->
+  <button id="btn-enter-fs" title="全屏（F11）" aria-label="全屏">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+         stroke-linecap="round" stroke-linejoin="round">
+      <path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"/>
+    </svg>
+  </button>
+  <button id="btn-exit-fs" title="退出全屏（F11）" aria-label="退出全屏" hidden>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+         stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 9h5V4M20 9h-5V4M4 15h5v5M20 15h-5v5"/>
+    </svg>
+  </button>
   <!-- 退出：全屏/浮窗没有标题栏，这里（和浮窗按钮排）是唯一的可见出口 -->
   <button id="btn-quit" title="退出程序" aria-label="退出程序">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
@@ -249,6 +249,7 @@
           <label class="field span2">
             <span>时间偏移（秒，可正可负；学校挂钟不准时校准用，如 +8）</span>
             <input type="number" id="f-timeoffset" step="1" placeholder="0" />
+            <span class="field-note" id="timeoffset-live"></span>
           </label>
 
           <label class="field span2">
@@ -348,9 +349,9 @@
     </div>
 
     <div class="settings-foot">
-      <span class="hint" id="dirty-hint"></span>
-      <button class="btn ghost" id="btn-revert">放弃修改</button>
-      <button class="btn primary" id="btn-save">保存</button>
+      <span class="hint" id="save-note">改动会即时保存</span>
+      <!-- 唯一带确认框的操作：会丢掉用户自己写的作息方案 -->
+      <button class="btn ghost" id="btn-restore-defaults">恢复默认配置</button>
     </div>
   </div>
 </div>

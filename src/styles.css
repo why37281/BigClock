@@ -352,20 +352,19 @@ html[data-lum="dark"] .date { text-shadow: var(--ts, 0 .26vmin 1.1vmin rgba(0,0,
 }
 
 /* ===================== 控制条 =====================
-   这段是从 design-preview.html 的 #devbar 原样搬过来的：
-   半透明黑底 rgba(0,0,0,.66)、圆角 14px、blur(8px)、按钮 1px 白描边、
-   选中项用 outline 2px 白框。平时 opacity:0，鼠标移上去才浮现，不挡大屏。
-   刻意只留三项（主题 / 显示模式 / 设置）—— 对比度、底色这类
-   "调一次就不动"的挪进了设置面板。 */
+   这段是从 design-preview.html 的 #devbar 搬过来的：
+   半透明黑底 rgba(0,0,0,.66)、圆角 14px、blur(8px)、按钮 1px 白描边。
+   除了浮窗模式以外【始终显示】—— 之前靠 body:hover 才浮现，触屏上根本没有
+   "hover"，大屏上又常常找不到入口；常驻半透明就够低调，不会挡内容。
+   打开设置时藏起来（设置是盖住全屏的模态层，露出来也点不到）。 */
 #devbar {
   position: fixed; left: 2.4vmin; bottom: 2.4vmin; z-index: 50;
   display: flex; align-items: center; gap: 6px;
   font-family: system-ui, sans-serif; font-size: 14px;
   background: rgba(0,0,0,.66); padding: 8px 10px; border-radius: 14px;
   backdrop-filter: blur(8px); color: #fff;
-  opacity: 0; transition: opacity .3s;
+  opacity: .9; transition: opacity .25s;
 }
-body:hover #devbar { opacity: .9; }
 body.settings-open #devbar { opacity: 0; pointer-events: none; }
 
 #devbar button {
@@ -446,6 +445,13 @@ body.settings-open #devbar { opacity: 0; pointer-events: none; }
    ★ 又是那个坑：上面的 display:flex 会盖掉 [hidden] 的 UA 规则，必须显式写。 */
 .field[hidden] { display: none; }
 .field > span { opacity: .72; }
+/* 控件下方的实时读数（时间偏移那两个时间） */
+.field-note {
+  font-size: 12px; line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  opacity: .68;
+  min-height: 1.4em;
+}
 .field.span2 { grid-column: 1 / -1; }
 .field select, .field input {
   font: inherit; font-size: 13px;
@@ -522,6 +528,7 @@ body.settings-open #devbar { opacity: 0; pointer-events: none; }
   padding: 14px 20px; border-top: 1px solid var(--panel-line);
 }
 .settings-foot .hint { flex: 1 1 auto; }
+.settings-foot .hint.err { color: #E06C75; opacity: .95; }
 
 .file-hint { margin: 0 0 10px; line-height: 1.6; }
 .file-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -534,8 +541,9 @@ body.settings-open #devbar { opacity: 0; pointer-events: none; }
 }
 
 /* ===================== 角落提示（配置出错等） ===================== */
+/* 控制条改成常驻之后（左下角），这条提示往上让开一档，别把工具栏盖住 */
 .corner-note {
-  position: fixed; left: 2.4vmin; bottom: 2.4vmin; z-index: 60;
+  position: fixed; left: 2.4vmin; bottom: calc(2.4vmin + 62px); z-index: 60;
   max-width: 46vw;
   font-family: system-ui, "Microsoft YaHei UI", sans-serif;
   font-size: 13px; line-height: 1.55;
