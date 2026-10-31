@@ -63,7 +63,8 @@ pub fn save_config(state: State<'_, AppState>, config: Config) -> Result<ConfigP
     }
 
     config::save(&state.path, &n.config)?;
-    let raw = std::fs::read_to_string(&state.path).unwrap_or_default();
+    // 与 save() 共用锁的读：刚写完立刻读回来，别被并发写串到
+    let raw = config::read_text(&state.path).unwrap_or_default();
 
     *state.config.lock().unwrap() = n.config.clone();
     *state.raw.lock().unwrap() = raw.clone();
@@ -83,14 +84,14 @@ pub fn save_config(state: State<'_, AppState>, config: Config) -> Result<ConfigP
 /// 比读整个配置包轻，也避免每次轮询都触发一次解析。
 #[tauri::command]
 pub fn raw_config(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let text = std::fs::read_to_string(&state.path).map_err(|e| format!("读配置失败：{e}"))?;
+    let text = config::read_text(&state.path)?;
     Ok(serde_json::json!({ "raw": text }))
 }
 
 /// 前端看到文件变了（轮询发现文本不同）之后调它，拿到解析结果
 #[tauri::command]
 pub fn reload_config(state: State<'_, AppState>) -> Result<ConfigPayload, String> {
-    let raw = std::fs::read_to_string(&state.path).map_err(|e| format!("读配置失败：{e}"))?;
+    let raw = config::read_text(&state.path)?;
 
     match toml::from_str::<Config>(&raw) {
         Ok(parsed) => {

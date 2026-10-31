@@ -15,6 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------- 配置结构
@@ -464,7 +465,14 @@ fn dir_writable(dir: &Path) -> bool {
     }
 }
 
-/// 默认配置文件内容（带中文注释，用户可以直接拿记事本改）
+/// 默认配置文件内容（带中文注释，用户可以直接拿记事本改）。
+///
+/// ★ 这段文本必须能被 toml 解析成 Config。
+///   历史 bug：这里曾经把 theme / mode / … / float_y 整整写了两遍（复制粘贴
+///   留下的），而 TOML 不允许同一个键出现两次。于是"删掉配置文件让它重新生成"
+///   反而启动报错 —— 老配置文件是旧版本用 serde 写出来的、没有重复键，所以能用；
+///   一旦删掉，新生成的就是一份语法错误文件。现在的写法只有一遍键，
+///   末尾的单元测试 `default_config_text_parses` 会守住这条底线。
 pub fn default_config_text() -> String {
     let base = Config::default();
     let mut s = String::new();
@@ -480,7 +488,10 @@ pub fn default_config_text() -> String {
     s.push_str("# theme   : dark（晚自习）/ light（白天开灯）/ 彩色主题：\n");
     s.push_str("#           indigo 靛蓝 / ocean 深海 / forest 森林 / grape 葡萄\n");
     s.push_str("#           sunset 落日 / rose 玫瑰 / paper 宣纸（亮）/ mint 薄荷（亮）\n");
+    s.push_str("# theme_dark / theme_light : 亮暗切换的两个\"槽\"（最近用的暗色/亮色主题），\n");
+    s.push_str("#           切换按钮在这两个之间翻，不会把彩色主题顶掉；程序自动维护\n");
     s.push_str("# mode    : fullscreen（全屏展示）/ window（窗口配置）/ float（浮窗·置顶小窗）\n");
+    s.push_str("#           —— 只记\"上一次的形态\"：启动时 window 会强制回全屏，float 会保留\n");
     s.push_str("# half    : full（整屏）/ left（左半屏）/ right（右半屏）/ custom（自定义边界）\n");
     s.push_str("#           —— 黑板挡哪边选哪边；custom 时用 crop_left / crop_right 微调\n");
     s.push_str("#           窗口始终铺满整块屏，半屏只是把内容挪到那一半，另一半留黑\n");
@@ -491,28 +502,11 @@ pub fn default_config_text() -> String {
     s.push_str("#           只对暗色 / 亮色两个基础主题有效\n");
     s.push_str("# crop_left / crop_right : 自定义边界（half = custom 时生效），\n");
     s.push_str("#           左右各缩进屏宽的百分比，0 = 不缩；两侧合计 ≤ 70\n");
-    s.push_str("# float_w / float_h : 浮窗大小（逻辑像素），0 = 用默认\n");
+    s.push_str("# float_w / float_h : 浮窗大小（逻辑像素），0 = 用默认（640×260）\n");
     s.push_str("# float_x / float_y : 浮窗位置（物理像素），-1 = 不指定\n");
     s.push_str("# clock_format: hm（19:29）/ hms（19:29:53）\n");
-    s.push_str("# title   : 顶部标题，留空则不显示\n\n");
-    s.push_str("# theme_dark / theme_light : 亮暗切换的两个\"槽\"——最近用的暗色/亮色主题，\n");
-    s.push_str("#           切换按钮在这两个之间翻，不会把彩色主题顶掉（程序自动维护）\n");
-    s.push_str(&format!("theme        = \"{}\"\n", base.theme));
-    s.push_str(&format!("theme_dark   = \"{}\"\n", base.theme_dark));
-    s.push_str(&format!("theme_light  = \"{}\"\n", base.theme_light));
-    s.push_str(&format!("mode         = \"{}\"\n", base.mode));
-    s.push_str(&format!("half         = \"{}\"\n", base.half));
-    s.push_str(&format!("screen       = {}\n", base.screen));
-    s.push_str(&format!("contrast     = \"{}\"\n", base.contrast));
-    s.push_str(&format!("tint         = \"{}\"\n", base.tint));
-    s.push_str(&format!("crop_left    = {}\n", base.crop_left));
-    s.push_str(&format!("crop_right   = {}\n", base.crop_right));
-    s.push_str(&format!("float_w      = {}\n", base.float_w));
-    s.push_str(&format!("float_h      = {}\n", base.float_h));
-    s.push_str(&format!("float_x      = {}\n", base.float_x));
-    s.push_str(&format!("float_y      = {}\n", base.float_y));
-    s.push_str("# clock_format = \"{}\"\n");
-    s.push_str("# time_offset  : 展示时间的偏移量（秒，可正可负）——学校挂钟/打铃不准时校准用\n");
+    s.push_str("# time_offset : 展示时间的偏移量（秒，可正可负，允许超过 ±60）\n");
+    s.push_str("#           —— 学校挂钟/打铃不准时校准用，按自己学校实测的差改\n");
     s.push_str("# title   : 顶部标题，留空则不显示\n\n");
     s.push_str(&format!("theme        = \"{}\"\n", base.theme));
     s.push_str(&format!("theme_dark   = \"{}\"\n", base.theme_dark));
@@ -532,15 +526,10 @@ pub fn default_config_text() -> String {
     s.push_str(&format!("time_offset  = {}\n", base.time_offset));
     s.push_str(&format!("title        = \"{}\"\n\n", base.title));
 
-    s.push_str("# ---------- 进度条 ----------\n");
-    s.push_str("# enabled    : 是否显示进度条\n");
-    s.push_str("# show_names : 是否在当前段里显示段名\n");
-    s.push_str("# gap_minutes: 两个时段之间的空档是否自动补成「课间」段\n");
-    s.push_str("[bar]\n");
-    s.push_str(&format!("enabled     = {}\n", base.bar.enabled));
-    s.push_str(&format!("show_names  = {}\n", base.bar.show_names));
-    s.push_str(&format!("gap_minutes = {}\n\n", base.bar.gap_minutes));
-
+    // ★ active_plan 是【顶层】键，必须写在第一个表头（[bar]）之前。
+    //   TOML 里一个表头之后的所有键都归那张表，写在 [bar] 后面的
+    //   active_plan 会变成 bar.active_plan —— serde 不认识就静默丢掉，
+    //   于是"多套方案里当前生效的那套"永远退回默认值。
     s.push_str("# ---------- 作息方案 ----------\n");
     s.push_str("# 可以有多套方案（上午自习 / 晚自习各一套），在设置界面里随时切换。\n");
     s.push_str("# active_plan 指当前生效的方案名（按 name 匹配）。\n");
@@ -550,6 +539,16 @@ pub fn default_config_text() -> String {
     s.push_str("# 空档如果开了 gap_minutes，会自动补成「课间」。\n");
     s.push_str("# 在设置界面里改完保存，这个文件会被重写（注释会丢，属正常）。\n\n");
     s.push_str(&format!("active_plan = \"{}\"\n\n", base.active_plan));
+
+    s.push_str("# ---------- 进度条 ----------\n");
+    s.push_str("# enabled    : 是否显示进度条\n");
+    s.push_str("# show_names : 是否在当前段里显示段名\n");
+    s.push_str("# gap_minutes: 两个时段之间的空档是否自动补成「课间」段\n");
+    s.push_str("[bar]\n");
+    s.push_str(&format!("enabled     = {}\n", base.bar.enabled));
+    s.push_str(&format!("show_names  = {}\n", base.bar.show_names));
+    s.push_str(&format!("gap_minutes = {}\n\n", base.bar.gap_minutes));
+
     for plan in &base.plans {
         s.push_str("[[plans]]\n");
         s.push_str(&format!("name = \"{}\"\n", plan.name));
@@ -579,7 +578,18 @@ pub fn load_or_create(path: &Path) -> Result<Loaded, String> {
         if let Some(dir) = path.parent() {
             let _ = fs::create_dir_all(dir);
         }
-        fs::write(path, default_config_text()).map_err(|e| format!("写默认配置失败：{e}"))?;
+        // ★ 兜底：模板万一又被写坏（重复键 / 引号不配对），也不能让用户
+        //   "删掉配置文件之后反而起不来"。解析不过就退化成 serde 直接序列化的
+        //   无注释版本 —— 难看，但一定能用。
+        let template = default_config_text();
+        let text = if toml::from_str::<Config>(&template).is_ok() {
+            template
+        } else {
+            crate::startup_trace::log("默认配置模板无法解析，退回无注释版本");
+            toml::to_string_pretty(&Config::default())
+                .map_err(|e| format!("生成默认配置失败：{e}"))?
+        };
+        fs::write(path, text).map_err(|e| format!("写默认配置失败：{e}"))?;
     }
 
     // 每次启动都补一次隐藏属性：老版本留下的文件、用户自己取消隐藏的、
@@ -592,25 +602,53 @@ pub fn load_or_create(path: &Path) -> Result<Loaded, String> {
     Ok(Loaded { config: n.config, raw, warnings: n.warnings, issues: n.issues })
 }
 
-/// 写配置。先写临时文件再原子改名，避免"存到一半"被读到。
+/// 写盘串行化：前端可能同时发起两笔保存（设置面板的即时保存 + 浮窗几何），
+/// 两笔 truncate+write 同一个文件如果交错，内容会拼坏。
+static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 写配置。
+///
+/// ★ 就地覆盖【同一个文件】，不删、不新建。
+///   以前的写法是写一个 bigclock.toml.tmp 再 rename 成正式文件 —— 语义上等于
+///   "把旧文件删掉、换个新文件"。文件标识（File ID、创建时间）因此每次都变，
+///   资源管理器按修改时间排序时它会跳到别的位置，隐藏属性、ACL 也得重新补，
+///   某些同步盘/杀软会把它当成"新文件"再扫一遍。
+///   现在直接 truncate + write，文件从头到尾都是同一个。
+///
+///   代价：写到一半断电会留下半截文件（下一次启动会报"配置格式有误"并用默认值
+///   跑起来，不会白屏）。配置随时能重建，这个代价可以接受。
 pub fn save(path: &Path, cfg: &Config) -> Result<(), String> {
     let text = toml::to_string_pretty(cfg).map_err(|e| format!("序列化配置失败：{e}"))?;
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
     }
-    let tmp = path.with_extension("toml.tmp");
-    fs::write(&tmp, &text).map_err(|e| format!("写临时文件失败：{e}"))?;
-    match fs::rename(&tmp, path) {
-        Ok(_) => {}
-        Err(_) => {
-            // 目标被占用/跨盘时改名会失败，退化成直接覆盖
-            fs::write(path, &text).map_err(|e| format!("写配置失败：{e}"))?;
-            let _ = fs::remove_file(&tmp);
-        }
+
+    // 锁中毒也照写（写入本身不该因为别人的 panic 而失效）
+    let _guard = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .map_err(|e| format!("打开配置文件失败：{e}"))?;
+        f.write_all(text.as_bytes()).map_err(|e| format!("写配置失败：{e}"))?;
+        f.flush().map_err(|e| format!("写配置失败：{e}"))?;
+        // 拖浮窗时 onMoved 会频繁触发保存，不 sync 的话内容可能还压在系统缓存里
+        f.sync_all().map_err(|e| format!("写配置失败：{e}"))?;
     }
-    // 改名之后「隐藏」属性不会跟过来（新文件是默认属性），必须重新设一次
+
+    // 就地覆盖不会丢属性位，但用户可能手动取消过隐藏，还是补一次（幂等）
     hide_in_explorer(path);
     Ok(())
+}
+
+/// 读文件原文。与 save() 共用一把锁 —— 保存是"截断 + 写"，前端每秒轮询
+/// 文件原文如果正好撞进写盘中间，会读到半截内容、被误判成"配置格式有误"。
+pub fn read_text(path: &Path) -> Result<String, String> {
+    let _guard = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    fs::read_to_string(path).map_err(|e| format!("读配置失败：{e}"))
 }
 
 // ---------------------------------------------------------------- 隐藏属性
@@ -620,8 +658,8 @@ pub fn save(path: &Path, cfg: &Config) -> Result<(), String> {
 ///
 /// 只动属性位：不改内容、不改权限、不碰所有者。
 ///
-/// 【每次写盘后都要调】save() 是先写 bigclock.toml.tmp 再改名成正式文件，
-/// 改名之后新文件用的是默认属性，原来的「隐藏」不会跟过来。
+/// 【每次写盘后都要调】虽然现在 save() 是就地覆盖、属性位本来就不会丢，
+/// 但用户可能手动取消过隐藏，补一次是幂等的。
 #[cfg(windows)]
 pub fn hide_in_explorer(path: &Path) {
     use std::os::windows::ffi::OsStrExt;
@@ -656,4 +694,109 @@ pub fn hide_in_explorer(_path: &Path) {}
 extern "system" {
     fn GetFileAttributesW(lp_file_name: *const u16) -> u32;
     fn SetFileAttributesW(lp_file_name: *const u16, dw_file_attributes: u32) -> i32;
+}
+
+// ---------------------------------------------------------------- 单元测试
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ★ 守着"删掉配置文件之后反而起不来"那个 bug：
+    ///   默认模板必须能被 toml 解析，而且归一化后不该有任何提示或校验问题。
+    #[test]
+    fn default_config_text_parses() {
+        let text = default_config_text();
+        let parsed: Config =
+            toml::from_str(&text).expect("默认配置模板不是合法 TOML（重复键 / 语法错误）");
+        let n = normalize(parsed);
+        assert!(n.warnings.is_empty(), "默认配置不该产生提示：{:?}", n.warnings);
+        let issues: Vec<&str> = n.issues.iter().map(|i| i.message.as_str()).collect();
+        assert!(issues.is_empty(), "默认配置不该产生校验问题：{issues:?}");
+        assert_eq!(n.config.active_plan, "晚自习");
+        assert_eq!(n.config.plans.len(), 1);
+        assert_eq!(n.config.plans[0].periods.len(), 4);
+        assert_eq!(n.config.time_offset, 0);
+    }
+
+    /// ★ 守着另一个模板 bug：顶层键写到了某个表头后面。
+    ///   TOML 里 [bar] 之后的所有键都归 bar 表，写在它后面的 active_plan
+    ///   会变成 bar.active_plan —— serde 静默忽略，于是"当前生效的方案"
+    ///   永远退回默认值（多套作息方案时表现为切换了却还是原来那套）。
+    #[test]
+    fn default_config_text_has_top_level_keys() {
+        let doc: toml::Value = toml::from_str(&default_config_text()).expect("模板不是合法 TOML");
+        for key in ["theme", "mode", "half", "time_offset", "active_plan"] {
+            assert!(
+                doc.get(key).is_some(),
+                "顶层缺少键 {key}（是不是写到某个 [表头] 后面去了？）"
+            );
+        }
+        let bar = doc
+            .get("bar")
+            .and_then(|v| v.as_table())
+            .expect("缺少 [bar] 表");
+        assert!(!bar.contains_key("active_plan"), "active_plan 被写进 [bar] 里了");
+        assert!(
+            doc.get("plans").map(|v| v.is_array()).unwrap_or(false),
+            "缺少 [[plans]] 数组"
+        );
+    }
+
+    /// 就地覆盖写盘：两次保存内容一致、文件里没有残留的临时文件、
+    /// 写出来的东西永远能被读回来。
+    #[test]
+    fn save_roundtrip_in_place() {
+        let dir = std::env::temp_dir().join(format!("bigclock-test-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("bigclock.toml");
+        let cfg = normalize(Config::default()).config;
+
+        save(&path, &cfg).expect("第一次保存失败");
+        let first = fs::read_to_string(&path).expect("读不回来");
+        assert!(toml::from_str::<Config>(&first).is_ok(), "写出来的不是合法 TOML");
+
+        save(&path, &cfg).expect("第二次保存失败");
+        let second = fs::read_to_string(&path).expect("读不回来");
+        assert_eq!(first, second, "同一份配置连续保存两次，内容不一致");
+
+        let leftovers: Vec<String> = fs::read_dir(&dir)
+            .expect("列目录失败")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n != "bigclock.toml")
+            .collect();
+        assert!(leftovers.is_empty(), "就地保存不该留下多余文件：{leftovers:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 删掉配置文件后重新生成这条路（历史 bug 的现场）：
+    /// 生成出来的文件本身必须是合法 TOML，而且能立刻被读回来。
+    #[test]
+    fn load_or_create_writes_parsable_default() {
+        let dir = std::env::temp_dir()
+            .join(format!("bigclock-test-fresh-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("建临时目录失败");
+        let path = dir.join("bigclock.toml");
+        assert!(!path.exists(), "前置条件：配置文件不存在");
+
+        let loaded = load_or_create(&path).expect("首次启动应该能生成并读回默认配置");
+        assert_eq!(loaded.config.plans.len(), 1);
+        assert_eq!(loaded.config.plans[0].periods.len(), 4);
+
+        let text = fs::read_to_string(&path).expect("读不回来");
+        assert!(text.contains("BigClock 配置文件"), "新生成的文件应该带注释");
+        assert!(
+            toml::from_str::<Config>(&text).is_ok(),
+            "删掉配置文件后重新生成的内容必须是合法 TOML"
+        );
+
+        // 第二次读同一个文件也必须成功（不该再走"重新生成"）
+        let again = load_or_create(&path).expect("第二次读配置失败");
+        assert_eq!(again.config.time_offset, 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
